@@ -43,30 +43,19 @@ YELLOW='\033[33m'
 GRAY='\033[90m'
 RESET='\033[0m'
 
-# Get pane info from tmux
-PANE_INFO=$(tmux list-panes -t "$SESSION_NAME" -F '#{pane_title}:#{pane_dead}' 2>/dev/null)
+# Get process count from sidecar.yaml (only configured processes, not dynamic terminals)
+CONFIG_FILE="$WORKSPACE_DIR/sidecar.yaml"
+if [ ! -f "$CONFIG_FILE" ]; then
+  CONFIG_FILE="$WORKSPACE_DIR/sidecar.yml"
+fi
 
-# Count panes and their status
-TOTAL=0
-RUNNING=0
-DEAD=0
+# Count process entries in yaml (lines under "processes:" section with 2-space indent)
+# This looks for lines like "  processname:" after "processes:"
+PROCESS_COUNT=$(awk '/^processes:/{found=1; next} found && /^  [a-zA-Z0-9_-]+:/{count++} found && /^[^ ]/{exit} END{print count+0}' "$CONFIG_FILE" 2>/dev/null)
 
-while IFS= read -r line; do
-  if [ -n "$line" ]; then
-    TOTAL=$((TOTAL + 1))
-    if [[ "$line" == *":1" ]]; then
-      DEAD=$((DEAD + 1))
-    else
-      RUNNING=$((RUNNING + 1))
-    fi
-  fi
-done <<< "$PANE_INFO"
-
-# Build status indicator
-if [ "$DEAD" -gt 0 ]; then
-  STATUS="${RED}${DEAD}✗${RESET}"
-elif [ "$RUNNING" -gt 0 ]; then
-  STATUS="${GREEN}${RUNNING}✓${RESET}"
+# Build status indicator - session exists means processes are managed
+if [ "$PROCESS_COUNT" -gt 0 ]; then
+  STATUS="${GREEN}${PROCESS_COUNT}✓${RESET}"
 else
   STATUS="${GRAY}○${RESET}"
 fi
