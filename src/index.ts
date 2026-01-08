@@ -12,6 +12,7 @@ import * as path from "path";
 import { loadConfig, configExists } from "./config.js";
 import { ProcessManager } from "./process-manager.js";
 import { TmuxManager, isTmuxAvailable, listSidecarSessions } from "./tmux-manager.js";
+import { InteractionManager } from "./interaction-manager.js";
 
 type Command = "server" | "sessions" | "attach" | "help";
 
@@ -242,6 +243,48 @@ const RemoveTerminalSchema = z.object({
   name: z.string().describe("Name of the terminal to remove"),
 });
 
+// Test blocking tool schema (for validating progress heartbeats)
+const TestBlockingSchema = z.object({
+  duration_seconds: z.number().describe("How long to block in seconds"),
+  heartbeat_interval_ms: z.number().optional().describe("Progress heartbeat interval in ms (default: 25000)"),
+});
+
+// Interaction tool schemas
+const FormQuestionSchema = z.object({
+  question: z.string().describe("The question to ask"),
+  header: z.string().describe("Short label for the question (max 12 chars)"),
+  options: z.array(z.object({
+    label: z.string().describe("Option label"),
+    description: z.string().optional().describe("Option description"),
+  })).optional().describe("Options for selection (if not provided, renders text input)"),
+  multiSelect: z.boolean().optional().describe("Allow multiple selections"),
+  inputType: z.enum(["text", "textarea", "password"]).optional().describe("Input type for text questions"),
+  placeholder: z.string().optional().describe("Placeholder text for input"),
+  validation: z.string().optional().describe("Regex pattern for validation"),
+});
+
+const FormSchemaSchema = z.object({
+  questions: z.array(FormQuestionSchema).min(1).describe("Questions to ask"),
+});
+
+const ShowInteractionSchema = z.object({
+  schema: FormSchemaSchema.optional().describe("Form schema (AskUserQuestion-compatible)"),
+  ink_file: z.string().optional().describe("Path to custom Ink component file (.tsx/.jsx)"),
+  title: z.string().optional().describe("Form title"),
+  group: z.string().optional().describe("tmux layout group"),
+  timeout_ms: z.number().optional().describe("Auto-cancel after N ms"),
+  block: z.boolean().optional().describe("Block until done (default: true)"),
+});
+
+const GetInteractionResultSchema = z.object({
+  interaction_id: z.string().describe("Interaction ID from non-blocking show_interaction"),
+  block: z.boolean().optional().describe("Wait for result (default: false)"),
+});
+
+const CancelInteractionSchema = z.object({
+  interaction_id: z.string().describe("Interaction ID to cancel"),
+});
+
 // Process tools
 const PROCESS_TOOLS: Tool[] = [
   {
@@ -347,6 +390,78 @@ const PROCESS_TOOLS: Tool[] = [
       required: ["name"],
     },
   },
+  {
+    name: "test_blocking",
+    description: "Test tool that blocks for a specified duration while sending progress heartbeats. Used to validate timeout handling.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        duration_seconds: { type: "number", description: "How long to block in seconds" },
+        heartbeat_interval_ms: { type: "number", description: "Progress heartbeat interval in ms (default: 25000)" },
+      },
+      required: ["duration_seconds"],
+    },
+  },
+  {
+    name: "show_interaction",
+    description: "Show an interactive form or custom Ink component in a tmux pane and collect user input. By default blocks until user completes the form.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        schema: {
+          type: "object",
+          description: "Form schema with questions (AskUserQuestion-compatible)",
+          properties: {
+            questions: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  question: { type: "string", description: "The question to ask" },
+                  header: { type: "string", description: "Short label (max 12 chars)" },
+                  options: { type: "array", description: "Selection options (omit for text input)" },
+                  multiSelect: { type: "boolean", description: "Allow multiple selections" },
+                  inputType: { type: "string", enum: ["text", "textarea", "password"] },
+                  placeholder: { type: "string" },
+                  validation: { type: "string", description: "Regex pattern" },
+                },
+                required: ["question", "header"],
+              },
+            },
+          },
+          required: ["questions"],
+        },
+        ink_file: { type: "string", description: "Path to custom Ink component file (.tsx/.jsx) - saves tokens!" },
+        title: { type: "string", description: "Form title" },
+        group: { type: "string", description: "tmux layout group" },
+        timeout_ms: { type: "number", description: "Auto-cancel timeout in ms" },
+        block: { type: "boolean", description: "Block until done (default: true)" },
+      },
+    },
+  },
+  {
+    name: "get_interaction_result",
+    description: "Get the result of a non-blocking interaction",
+    inputSchema: {
+      type: "object",
+      properties: {
+        interaction_id: { type: "string", description: "Interaction ID from show_interaction" },
+        block: { type: "boolean", description: "Wait for result (default: false)" },
+      },
+      required: ["interaction_id"],
+    },
+  },
+  {
+    name: "cancel_interaction",
+    description: "Cancel an active interaction",
+    inputSchema: {
+      type: "object",
+      properties: {
+        interaction_id: { type: "string", description: "Interaction ID to cancel" },
+      },
+      required: ["interaction_id"],
+    },
+  },
 ];
 
 function formatToolError(message: string) {
@@ -403,6 +518,7 @@ async function main() {
   let configDir: string = workspaceDir;
   let processManager: ProcessManager | undefined;
   let tmuxManager: TmuxManager | undefined;
+  let interactionManager: InteractionManager | undefined;
 
   if (hasConfig) {
     const loaded = await loadConfig(parsedArgs.config);
@@ -427,6 +543,13 @@ async function main() {
       tmuxManager,
     });
     await processManager.startAll(config);
+
+    // Initialize interaction manager for interactive forms
+    interactionManager = new InteractionManager({
+      tmuxManager,
+      inkRunnerPath: path.join(process.cwd(), "packages", "ink-runner", "dist", "index.js"),
+      cwd: configDir,  // Project root for resolving .sidecar/interactive paths
+    });
 
     // Auto-attach terminal if configured
     if (config.settings?.autoAttachTerminal) {
@@ -590,6 +713,8 @@ async function main() {
         };
       }
 
+      // test_blocking is handled separately in the request handler (needs server access)
+
       default:
         return formatToolError(`Unknown tool: ${name}`);
     }
@@ -615,6 +740,20 @@ async function main() {
     // Process tools (always available if config exists)
     if (processManager) {
       tools = [...tools, ...PROCESS_TOOLS];
+    } else {
+      // test_blocking is always available (for testing progress notifications)
+      tools.push({
+        name: "test_blocking",
+        description: "Test tool that blocks for a specified duration while sending progress heartbeats. Used to validate timeout handling.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            duration_seconds: { type: "number", description: "How long to block in seconds" },
+            heartbeat_interval_ms: { type: "number", description: "Progress heartbeat interval in ms (default: 25000)" },
+          },
+          required: ["duration_seconds"],
+        },
+      });
     }
 
     return { tools };
@@ -625,6 +764,211 @@ async function main() {
     const { name, arguments: args } = request.params;
 
     try {
+      // Handle test_blocking specially (needs server access for progress notifications)
+      if (name === "test_blocking") {
+        const parsed = TestBlockingSchema.parse(args);
+        const durationMs = parsed.duration_seconds * 1000;
+        const heartbeatIntervalMs = parsed.heartbeat_interval_ms ?? 25000;
+        const progressToken = request.params._meta?.progressToken;
+
+        console.error(`[sidecar] test_blocking: duration=${durationMs}ms, heartbeat=${heartbeatIntervalMs}ms, progressToken=${progressToken}`);
+
+        const startTime = Date.now();
+        let heartbeatCount = 0;
+
+        while (Date.now() - startTime < durationMs) {
+          // Wait for heartbeat interval or remaining time, whichever is shorter
+          const remaining = durationMs - (Date.now() - startTime);
+          const waitTime = Math.min(heartbeatIntervalMs, remaining);
+
+          if (waitTime > 0) {
+            await new Promise(resolve => setTimeout(resolve, waitTime));
+          }
+
+          // Send progress notification if we have a token and still have time left
+          if (progressToken && Date.now() - startTime < durationMs) {
+            heartbeatCount++;
+            const elapsed = Date.now() - startTime;
+            const progress = Math.min(elapsed / durationMs, 0.99);
+
+            console.error(`[sidecar] Sending progress heartbeat #${heartbeatCount}: ${(progress * 100).toFixed(1)}%`);
+
+            try {
+              await server.notification({
+                method: "notifications/progress",
+                params: {
+                  progressToken,
+                  progress,
+                  total: 1,
+                  message: `Blocking... ${Math.round(elapsed / 1000)}s / ${parsed.duration_seconds}s`
+                }
+              });
+            } catch (err) {
+              console.error(`[sidecar] Failed to send progress notification:`, err);
+            }
+          }
+        }
+
+        const actualDuration = Date.now() - startTime;
+        return {
+          content: [{
+            type: "text",
+            text: `Blocked for ${actualDuration}ms (requested ${durationMs}ms)\nSent ${heartbeatCount} progress heartbeats\nProgress token was: ${progressToken ? "provided" : "NOT provided"}`
+          }],
+        };
+      }
+
+      // Handle show_interaction (needs server access for progress notifications)
+      if (name === "show_interaction") {
+        if (!interactionManager || !tmuxManager) {
+          return formatToolError("No sidecar.yaml found - interaction tools not available");
+        }
+
+        const parsed = ShowInteractionSchema.parse(args);
+
+        if (!parsed.schema && !parsed.ink_file) {
+          return formatToolError("Either schema or ink_file is required");
+        }
+
+        const interactionId = await interactionManager.create({
+          schema: parsed.schema,
+          inkFile: parsed.ink_file,
+          title: parsed.title,
+          group: parsed.group,
+          timeoutMs: parsed.timeout_ms,
+        });
+
+        // Non-blocking mode
+        if (parsed.block === false) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({ interaction_id: interactionId, status: "pending" })
+            }],
+          };
+        }
+
+        // Blocking mode with progress heartbeats
+        const progressToken = request.params._meta?.progressToken;
+        const heartbeatIntervalMs = 25000;
+        const startTime = Date.now();
+        let heartbeatCount = 0;
+
+        console.error(`[sidecar] show_interaction blocking: id=${interactionId}, progressToken=${progressToken}`);
+
+        while (true) {
+          // Wait for result with short timeout
+          const result = await interactionManager.waitForResult(interactionId, heartbeatIntervalMs);
+
+          if (result) {
+            return {
+              content: [{
+                type: "text",
+                text: JSON.stringify(result)
+              }],
+            };
+          }
+
+          // Check if interaction was cancelled/timed out
+          const state = interactionManager.getState(interactionId);
+          if (state && state.status !== "pending") {
+            return {
+              content: [{
+                type: "text",
+                text: JSON.stringify(state.result || { action: state.status })
+              }],
+            };
+          }
+
+          // Check tool-level timeout if specified
+          if (parsed.timeout_ms) {
+            const elapsed = Date.now() - startTime;
+            if (elapsed >= parsed.timeout_ms) {
+              await interactionManager.cancel(interactionId);
+              return {
+                content: [{
+                  type: "text",
+                  text: JSON.stringify({ action: "timeout" })
+                }],
+              };
+            }
+          }
+
+          // Send progress heartbeat to keep connection alive
+          if (progressToken) {
+            heartbeatCount++;
+            console.error(`[sidecar] Sending progress heartbeat #${heartbeatCount} for ${interactionId}`);
+
+            try {
+              await server.notification({
+                method: "notifications/progress",
+                params: {
+                  progressToken,
+                  progress: 0,
+                  message: "Waiting for user input..."
+                }
+              });
+            } catch (err) {
+              console.error(`[sidecar] Failed to send progress notification:`, err);
+            }
+          }
+        }
+      }
+
+      // Handle get_interaction_result
+      if (name === "get_interaction_result") {
+        if (!interactionManager) {
+          return formatToolError("No sidecar.yaml found - interaction tools not available");
+        }
+
+        const parsed = GetInteractionResultSchema.parse(args);
+        const state = interactionManager.getState(parsed.interaction_id);
+
+        if (!state) {
+          return formatToolError(`Interaction "${parsed.interaction_id}" not found`);
+        }
+
+        // If blocking requested and still pending, wait
+        if (parsed.block && state.status === "pending") {
+          const result = await interactionManager.waitForResult(parsed.interaction_id, 30000);
+          if (result) {
+            return {
+              content: [{
+                type: "text",
+                text: JSON.stringify({ status: "completed", result })
+              }],
+            };
+          }
+        }
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              status: state.status,
+              result: state.result
+            })
+          }],
+        };
+      }
+
+      // Handle cancel_interaction
+      if (name === "cancel_interaction") {
+        if (!interactionManager) {
+          return formatToolError("No sidecar.yaml found - interaction tools not available");
+        }
+
+        const parsed = CancelInteractionSchema.parse(args);
+        const success = await interactionManager.cancel(parsed.interaction_id);
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({ success })
+          }],
+        };
+      }
+
       return await handleToolCall(name, args as Record<string, unknown>);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
