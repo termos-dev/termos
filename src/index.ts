@@ -11,7 +11,7 @@ import { z } from "zod";
 import * as path from "path";
 import { loadConfig, configExists } from "./config.js";
 import { ProcessManager } from "./process-manager.js";
-import { TmuxManager, isTmuxAvailable, listSidecarSessions } from "./tmux-manager.js";
+import { TmuxManager, isTmuxAvailable, listSidecarSessions, isInsideTmux } from "./tmux-manager.js";
 import { InteractionManager } from "./interaction-manager.js";
 
 type Command = "server" | "sessions" | "attach" | "help";
@@ -692,8 +692,8 @@ async function main() {
           parsed.group
         );
 
-        // Auto-open terminal if not already attached
-        if (config?.settings?.autoAttachTerminal !== false) {
+        // Auto-open terminal if not already attached (skip if inside tmux - user can switch manually)
+        if (config?.settings?.autoAttachTerminal !== false && !isInsideTmux()) {
           await tmuxManager.openTerminal(config?.settings?.terminalApp, configDir);
         }
 
@@ -845,8 +845,8 @@ async function main() {
           timeoutMs: parsed.timeout_ms,
         });
 
-        // Auto-open terminal if not already attached
-        if (config?.settings?.autoAttachTerminal !== false) {
+        // Auto-open terminal if not already attached (skip if inside tmux - user can switch manually)
+        if (config?.settings?.autoAttachTerminal !== false && !isInsideTmux()) {
           await tmuxManager.openTerminal(config?.settings?.terminalApp, configDir);
         }
 
