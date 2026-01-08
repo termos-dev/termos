@@ -110,29 +110,28 @@ export class InteractionManager extends EventEmitter {
   }
 
   private findInkRunnerPath(): string {
-    // Try to find ink-runner relative to this module's location
-    // __dirname is dist/ so go up one level to find packages/
-    const moduleRoot = path.join(__dirname, "..");
+    // ink-runner is copied to dist/ink-runner/ during build
+    // __dirname is dist/ so ink-runner is at dist/ink-runner/dist/index.js
+    const distPath = path.join(__dirname, "ink-runner", "dist", "index.js");
 
-    const possiblePaths = [
-      // Primary: relative to this module (works when mcp-sidecar is installed)
-      path.join(moduleRoot, "packages", "ink-runner", "dist", "index.js"),
-      // Development: relative to cwd (when running from source)
-      path.join(process.cwd(), "packages", "ink-runner", "dist", "index.js"),
-      // npm global or local node_modules
-      "ink-runner",
-    ];
-
-    for (const p of possiblePaths) {
-      if (p === "ink-runner" || fs.existsSync(p)) {
-        return p;
-      }
+    if (fs.existsSync(distPath)) {
+      return distPath;
     }
 
-    // Default to module-relative path with helpful error context
-    const defaultPath = possiblePaths[0];
-    console.error(`[sidecar] Warning: ink-runner not found at expected path: ${defaultPath}`);
-    return defaultPath;
+    // Fallback for development: try the packages folder
+    const devPath = path.join(__dirname, "..", "packages", "ink-runner", "dist", "index.js");
+    if (fs.existsSync(devPath)) {
+      return devPath;
+    }
+
+    // Last resort: try cwd-relative path
+    const cwdPath = path.join(process.cwd(), "packages", "ink-runner", "dist", "index.js");
+    if (fs.existsSync(cwdPath)) {
+      return cwdPath;
+    }
+
+    console.error(`[sidecar] Warning: ink-runner not found. Expected at: ${distPath}`);
+    return distPath;
   }
 
   /**
