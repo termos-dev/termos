@@ -1017,6 +1017,8 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error("Fatal error:", err);
+  // Stringify error to avoid Node inspect issues with some error types
+  const errorMsg = err instanceof Error ? err.stack || err.message : String(err);
+  console.error("Fatal error:", errorMsg);
   process.exit(1);
 });
