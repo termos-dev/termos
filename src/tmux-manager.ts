@@ -798,7 +798,8 @@ export class TmuxManager {
    */
   private openInGhostty(command: string): boolean {
     try {
-      spawn("open", ["-na", "Ghostty.app", "--args", "-e", "/bin/bash", "-c", command], {
+      const title = `Sidecar: ${this.sessionName}`;
+      spawn("open", ["-na", "Ghostty.app", "--args", "--title", title, "-e", "/bin/bash", "-c", command], {
         detached: true,
         stdio: "ignore",
       }).unref();
@@ -815,12 +816,14 @@ export class TmuxManager {
    */
   private openInITerm(command: string): boolean {
     try {
+      const title = `Sidecar: ${this.sessionName}`;
       // Escape double quotes in command for AppleScript
       const escapedCommand = command.replace(/"/g, '\\"');
       const script = `
 tell application "iTerm2"
   create window with default profile
   tell current session of current window
+    set name to "${title}"
     write text "${escapedCommand}"
   end tell
 end tell`;
@@ -837,9 +840,10 @@ end tell`;
    * Open Kitty with command
    */
   private openInKitty(command: string): boolean {
+    const title = `Sidecar: ${this.sessionName}`;
     try {
       // Try kitty in PATH first, fall back to full path
-      spawn("kitty", ["-e", "/bin/bash", "-c", command], {
+      spawn("kitty", ["--title", title, "-e", "/bin/bash", "-c", command], {
         detached: true,
         stdio: "ignore",
       }).unref();
@@ -848,7 +852,7 @@ end tell`;
     } catch (err) {
       // Try full path as fallback
       try {
-        spawn("/Applications/kitty.app/Contents/MacOS/kitty", ["-e", "/bin/bash", "-c", command], {
+        spawn("/Applications/kitty.app/Contents/MacOS/kitty", ["--title", title, "-e", "/bin/bash", "-c", command], {
           detached: true,
           stdio: "ignore",
         }).unref();
