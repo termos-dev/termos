@@ -57,6 +57,8 @@ Process "api" restarted
 
 ## MCP Tools
 
+### Process Management
+
 | Tool | Description |
 |------|-------------|
 | `list_processes` | List all processes with status |
@@ -68,6 +70,33 @@ Process "api" restarted
 | `get_url(name)` | Get process URL |
 | `create_terminal(name, command, group?)` | Create a dynamic terminal in a layout group |
 | `remove_terminal(name)` | Remove a dynamic terminal |
+
+### Interactive Forms
+
+| Tool | Description |
+|------|-------------|
+| `show_interaction(ink_file, title?, block?)` | Show an interactive Ink component |
+| `get_interaction_result(id, block?)` | Get result from a non-blocking interaction |
+| `cancel_interaction(id)` | Cancel an active interaction |
+
+**Example usage:**
+
+```typescript
+// Create a custom Ink component in .sidecar/interactive/picker.tsx
+show_interaction({
+  ink_file: "picker.tsx",  // Relative to .sidecar/interactive/
+  title: "Select an option",
+  block: true  // Wait for user response
+})
+// Returns: { action: "accept", result: { selected: "Option A" } }
+```
+
+Custom Ink components should:
+- Export a default React component
+- Call `onComplete(result)` when done
+- Use `useApp().exit()` to close
+
+See `.sidecar/interactive/demo.tsx` for an example.
 
 ## Configuration
 
@@ -86,16 +115,27 @@ Process "api" restarted
 | `maxRestarts` | number | 5 | Max restart attempts |
 | `healthCheck` | string | none | HTTP path for health checks |
 | `dependsOn` | string/array | none | Process dependencies |
+| `stdoutPatternVars` | object | none | Regex patterns to extract variables from output |
+| `readyVars` | array | none | Variables required before process is "ready" |
 
 ### Settings
 
 ```yaml
 settings:
+  # Process management
   logBufferSize: 1000        # Log lines to keep per process
   healthCheckInterval: 10000  # Health check interval (ms)
   dependencyTimeout: 60000    # Dependency wait timeout (ms)
   restartBackoffMax: 30000    # Max restart backoff (ms)
   processStopTimeout: 5000    # Graceful stop timeout (ms)
+
+  # Tmux settings
+  tmuxSessionPrefix: sidecar  # Prefix for tmux session names
+  layout: grid                # Default pane layout
+
+  # Terminal settings
+  autoAttachTerminal: true    # Auto-open terminal on start
+  terminalApp: auto           # auto, ghostty, iterm, kitty, terminal
 ```
 
 ### Layout
@@ -138,6 +178,22 @@ Ports are automatically detected from process output. Common patterns:
 - `Local: http://localhost:5173`
 - `Server listening on port 3000`
 - `http://localhost:PORT`
+
+### Variable Extraction
+
+Extract values from process output using regex patterns:
+
+```yaml
+processes:
+  vite:
+    command: npm run dev
+    stdoutPatternVars:
+      url: "Local:\\s+(http://[^\\s]+)"
+      network: "Network:\\s+(http://[^\\s]+)"
+    readyVars: [url]  # Process is "ready" when these vars are captured
+```
+
+Captured variables are available via `get_status(name)`.
 
 ### Restart Policies
 
