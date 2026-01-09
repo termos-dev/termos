@@ -4,10 +4,10 @@
 # Layout options (top-level shortcut):
 # Simple presets:
 #   layout: grid        # Automatic grid (default)
-#   layout: horizontal  # All processes side by side
-#   layout: vertical    # All processes stacked
-#   layout: main-left   # First process large on left
-#   layout: main-top    # First process large on top
+#   layout: horizontal  # All services side by side
+#   layout: vertical    # All services stacked
+#   layout: main-left   # First service large on left
+#   layout: main-top    # First service large on top
 #
 # Grouped layouts with named groups:
 #   layout:
@@ -21,7 +21,7 @@
 
 # Optional settings
 # settings:
-#   logBufferSize: 1000        # Number of log lines to keep per process
+#   logBufferSize: 1000        # Number of log lines to keep per service
 #   healthCheckInterval: 10000  # Health check interval in ms
 #   dependencyTimeout: 60000    # Timeout waiting for dependencies in ms
 #   restartBackoffMax: 30000    # Max restart backoff in ms
@@ -30,7 +30,7 @@
 #   autoAttachTerminal: true    # Auto-open terminal attached to tmux session
 #   terminalApp: auto           # Terminal to use: auto, ghostty, iterm, kitty, terminal
 
-processes:
+services:
   # Frontend dev server - port auto-detected from output
   frontend:
     command: npm run dev

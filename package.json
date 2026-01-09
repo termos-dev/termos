@@ -1,6 +1,6 @@
 {
   "name": "mcp-ide",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Interactive Development Environment for Claude Code - manage processes, terminals, and interactive UIs",
   "type": "module",
   "main": "dist/index.js",

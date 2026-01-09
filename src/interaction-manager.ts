@@ -386,6 +386,7 @@ export class InteractionManager extends EventEmitter {
       // This must happen before pane check to handle edge case where pane is
       // forcibly removed but result file was already written
       const resultFilePath = getResultFilePath(id);
+      const pendingFilePath = `${resultFilePath}.pending`;
       try {
         if (existsSync(resultFilePath)) {
           const fileContent = readFileSync(resultFilePath, "utf-8");
@@ -393,7 +394,9 @@ export class InteractionManager extends EventEmitter {
           state.status = "completed";
           state.result = result;
           this.stopPolling(id);
-          // Clean up file immediately
+          // Delete pending file to signal confirmation to ink-runner
+          try { unlinkSync(pendingFilePath); } catch { /* ignore */ }
+          // Clean up result file immediately
           try { unlinkSync(resultFilePath); } catch { /* ignore */ }
           // Clean up pane after small delay to allow output to be seen
           setTimeout(() => this.cleanup(id), 1000);

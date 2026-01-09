@@ -154,13 +154,25 @@ export const SettingsSchema = z.object({
 export type Settings = z.infer<typeof SettingsSchema>;
 
 // Schema for the full config file
+// Supports both "services" (preferred) and "processes" (legacy) keys
 export const ConfigSchema = z.object({
   // Top-level shortcuts
   layout: LayoutSchema.optional().describe("Pane layout shorthand (overrides settings.layout)"),
   // Full settings
   settings: SettingsSchema.optional().describe("Global settings for the IDE"),
-  processes: z.record(ProcessConfigSchema),
-});
+  // Services (preferred) or processes (legacy alias)
+  services: z.record(ProcessConfigSchema).optional(),
+  processes: z.record(ProcessConfigSchema).optional(),
+}).refine(
+  (data) => data.services || data.processes,
+  { message: "Either 'services' or 'processes' must be defined" }
+).transform((data) => ({
+  ...data,
+  // Normalize: use services if present, otherwise use processes
+  services: data.services || data.processes || {},
+  // Keep processes for backward compat but services takes precedence
+  processes: data.services || data.processes || {},
+}));
 
 export type Config = z.infer<typeof ConfigSchema>;
 
@@ -234,7 +246,7 @@ function normalizeDependsOn(dependsOn: string | string[] | undefined): string[] 
 }
 
 /**
- * Resolve process configs with absolute paths and validate dependencies
+ * Resolve service configs with absolute paths and validate dependencies
  */
 export function resolveProcessConfigs(
   config: Config,
@@ -242,7 +254,7 @@ export function resolveProcessConfigs(
 ): ResolvedProcessConfig[] {
   const resolved: ResolvedProcessConfig[] = [];
 
-  for (const [name, processConfig] of Object.entries(config.processes)) {
+  for (const [name, processConfig] of Object.entries(config.services)) {
     const resolvedCwd = processConfig.cwd
       ? path.resolve(configDir, processConfig.cwd)
       : configDir;

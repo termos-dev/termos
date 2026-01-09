@@ -1,31 +1,31 @@
 ---
 name: start
-description: "Start dev environment, create terminals/panes, show Ink components and interactive forms, manage processes. Triggers: start dev, run server, create terminal, open pane, ink component, ask question, show form, interactive input, process status, dashboard, TUI."
+description: "Start dev environment, create terminals/panes, show Ink components and interactive forms, manage services. Triggers: start dev, run server, create terminal, open pane, ink component, ask question, show form, interactive input, service status, dashboard, TUI."
 allowed-tools: mcp__plugin_ide_ide__*
 ---
 
 # IDE Start Skill
 
-Start and manage your development environment with terminals, processes, interactive Ink components, and dashboards.
+Start and manage your development environment with terminals, services, interactive Ink components, and dashboards.
 
 ## Tools (8 total)
 
-### Process Management (require mide.yaml)
+### Service Management (require mide.yaml)
 
 | Tool | Description |
 |------|-------------|
-| `list_processes` | List all processes with status, port, URL, health |
-| `manage_process(name, op)` | Start, stop, or restart a process |
-| `get_logs(name, tail?)` | Get process logs |
+| `list_services` | List all services with status, port, URL, health |
+| `manage_service(name, op)` | Start, stop, or restart a service |
 
 ### Pane Management
 
 | Tool | Description |
 |------|-------------|
 | `create_pane(name, command)` | Create a terminal pane |
-| `create_interaction(schema?, ink_file?)` | Show interactive Ink form/component |
+| `show_user_interaction(schema?, ink_file?)` | Show interactive Ink form/component to user |
 | `remove_pane(name)` | Remove a pane |
-| `capture_pane(name, lines?)` | Capture terminal output |
+| `capture_pane(name, lines?)` | Capture terminal output from pane or service |
+| `get_user_interaction(id)` | Get result from completed interaction |
 
 ### Status
 
@@ -36,15 +36,15 @@ Start and manage your development environment with terminals, processes, interac
 ## Starting the Environment
 
 ```
-list_processes()  // Initializes tmux session, shows all processes
+list_services()  // Initializes tmux session, shows all services
 ```
 
-## Managing Processes
+## Managing Services
 
 ```
-manage_process(name: "api", op: "start")
-manage_process(name: "api", op: "stop")
-manage_process(name: "api", op: "restart")
+manage_service(name: "api", op: "start")
+manage_service(name: "api", op: "stop")
+manage_service(name: "api", op: "restart")
 ```
 
 ## Creating Terminal Panes
@@ -58,7 +58,7 @@ create_pane(name: "tests", command: "npm test --watch")
 
 **Schema mode** - Define forms inline:
 ```
-create_interaction(
+show_user_interaction(
   schema: {
     questions: [
       { question: "What's your name?", header: "Name", inputType: "text" },
@@ -74,7 +74,7 @@ create_interaction(
 
 **File mode** - Run custom Ink components:
 ```
-create_interaction(ink_file: "color-picker.tsx", title: "Pick a Color")
+show_user_interaction(ink_file: "color-picker.tsx", title: "Pick a Color")
 ```
 
 File resolution: `.mide/interactive/` → `~/.mide/interactive/`
@@ -107,21 +107,21 @@ export default MyComponent;
 
 **Available imports:** `ink`, `ink-text-input`, `ink-select-input`, `react`
 
-## Capturing Terminal Output
+## Capturing Output
 
 ```
 capture_pane(name: "dev-server", lines: 50)
 // Returns last 50 lines of terminal output
+// Works for both panes and services
 ```
 
 ## When to Use
 
 | User Intent | Tool |
 |-------------|------|
-| "start dev environment" | `list_processes` |
+| "start dev environment" | `list_services` |
 | "run a command" | `create_pane` |
-| "ask user a question" | `create_interaction` with schema |
-| "show a picker" | `create_interaction` with ink_file |
+| "ask user a question" | `show_user_interaction` with schema |
+| "show a picker" | `show_user_interaction` with ink_file |
 | "what's in the terminal" | `capture_pane` |
-| "restart the API" | `manage_process(op: "restart")` |
-| "show me the logs" | `get_logs` |
+| "restart the API" | `manage_service(op: "restart")` |

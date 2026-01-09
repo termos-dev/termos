@@ -101,12 +101,18 @@ export async function runFromFile(
     const entryScript = `
 import { render } from 'ink';
 import React from 'react';
-import { writeFileSync } from 'fs';
+import { writeFileSync, existsSync } from 'fs';
 import Component from ${JSON.stringify(absFilePath)};
 
 // Interaction ID for file-based result communication
 const __interactionId = ${interactionIdJson};
 const __resultFilePath = __interactionId ? '${RESULT_FILE_DIR}/mcp-interaction-' + __interactionId + '.result' : null;
+const __pendingFilePath = __resultFilePath ? __resultFilePath + '.pending' : null;
+
+// Set up the onProgress callback for intermediate updates
+globalThis.onProgress = function(data) {
+  console.log('__MCP_PROGRESS__:' + JSON.stringify(data));
+};
 
 // Set up the onComplete callback
 let __resultEmitted = false;
@@ -114,13 +120,32 @@ globalThis.onComplete = function(result) {
   if (__resultEmitted) return;
   __resultEmitted = true;
   const fullResult = { action: 'accept', result };
-  // Write to file first (synchronous, reliable)
+
+  // Write result and pending files synchronously (reliable, survives process kill)
   if (__resultFilePath) {
     writeFileSync(__resultFilePath, JSON.stringify(fullResult), 'utf-8');
   }
-  // Also emit to stdout for backward compatibility
+  if (__pendingFilePath) {
+    writeFileSync(__pendingFilePath, '', 'utf-8');
+  }
+
+  // Emit to stdout for capture_pane fallback
   console.log('__MCP_RESULT__:' + JSON.stringify(fullResult));
-  setTimeout(() => process.exit(0), 100);
+  console.log('\\n\\u2713 Waiting for confirmation...');
+
+  // Poll for confirmation (pending file deleted by InteractionManager)
+  const checkConfirmation = setInterval(() => {
+    if (__pendingFilePath && !existsSync(__pendingFilePath)) {
+      clearInterval(checkConfirmation);
+      process.exit(0);
+    }
+  }, 100);
+
+  // Fallback timeout after 60s
+  setTimeout(() => {
+    clearInterval(checkConfirmation);
+    process.exit(0);
+  }, 60000);
 };
 
 // Validate default export

@@ -3,7 +3,7 @@ import { Box, Text, useInput, useApp } from "ink";
 import TextInput from "ink-text-input";
 import SelectInput from "ink-select-input";
 import type { FormSchema, FormResult, FormOption } from "../types.js";
-import { emitResultWithFile } from "../types.js";
+import { emitResultWithFile, emitProgress } from "../types.js";
 
 interface Props {
   schema: FormSchema;
@@ -40,6 +40,13 @@ export function SchemaForm({ schema, title }: Props) {
     const newAnswers = { ...answers, [key]: value };
     setAnswers(newAnswers);
 
+    // Emit progress after each answer for capture_pane fallback
+    emitProgress({
+      step: currentIndex + 1,
+      total: schema.questions.length,
+      answers: newAnswers,
+    });
+
     if (isLastQuestion) {
       handleComplete({ action: "accept", answers: newAnswers });
     } else {
@@ -48,7 +55,7 @@ export function SchemaForm({ schema, title }: Props) {
       setMultiSelectState(new Set());
       setMultiSelectCursor(0);
     }
-  }, [answers, currentIndex, currentQuestion, isLastQuestion, handleComplete]);
+  }, [answers, currentIndex, currentQuestion, isLastQuestion, handleComplete, schema.questions.length]);
 
   // Convert options to SelectInput format
   const selectItems: SelectItem[] = currentQuestion?.options?.map((opt: FormOption) => ({

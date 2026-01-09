@@ -9,6 +9,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import * as path from "path";
+import { existsSync, readFileSync } from "fs";
 import { loadConfig, configExists } from "./config.js";
 import { ProcessManager } from "./process-manager.js";
 import { TmuxManager, EmbeddedTmuxManager, isTmuxAvailable, listIdeSessions, isInsideTmux } from "./tmux-manager.js";
@@ -104,7 +105,7 @@ tmux Integration:
   Use 'mcp-ide attach' to see process output in your terminal.
 
 Example mide.yaml:
-  processes:
+  services:
     api:
       command: npm run dev
       port: 3000
@@ -203,18 +204,12 @@ function formatAge(date: Date): string {
   return `${days}d`;
 }
 
-// Process tool schemas
-const ManageProcessSchema = z.object({
-  name: z.string().describe("Process name from mide.yaml"),
+// Service tool schemas
+const ManageServiceSchema = z.object({
+  name: z.string().describe("Service name from mide.yaml"),
   op: z.enum(["start", "stop", "restart"]).describe("Operation to perform"),
   args: z.string().optional().describe("Additional arguments (for start)"),
   force: z.boolean().optional().describe("Kill any process using the port (for start)"),
-});
-
-const GetLogsSchema = z.object({
-  name: z.string().describe("Process name"),
-  stream: z.enum(["stdout", "stderr", "combined"]).optional().describe("Log stream (default: combined)"),
-  tail: z.number().optional().describe("Number of lines to return (default: 100)"),
 });
 
 // Pane tool schemas
@@ -232,6 +227,11 @@ const RemovePaneSchema = z.object({
 const CapturePaneSchema = z.object({
   name: z.string().describe("Name of the pane to capture"),
   lines: z.number().optional().describe("Number of lines to capture (default: 100)"),
+  parse_markers: z.boolean().optional().describe("Parse __MCP_PROGRESS__ and __MCP_RESULT__ markers from output"),
+});
+
+const GetUserInteractionSchema = z.object({
+  interaction_id: z.string().describe("Interaction ID from show_user_interaction"),
 });
 
 // Interaction tool schemas
@@ -252,7 +252,7 @@ const FormSchemaSchema = z.object({
   questions: z.array(FormQuestionSchema).min(1).describe("Questions to ask"),
 });
 
-const CreateInteractionSchema = z.object({
+const ShowUserInteractionSchema = z.object({
   schema: FormSchemaSchema.optional().describe("Form schema (AskUserQuestion-compatible)"),
   ink_file: z.string().optional().describe("Path to custom Ink component file (.tsx/.jsx)"),
   title: z.string().optional().describe("Form title"),
@@ -271,12 +271,12 @@ const TestBlockingSchema = z.object({
   heartbeat_interval_ms: z.number().optional().describe("Progress heartbeat interval in ms (default: 25000)"),
 });
 
-// MCP Tools - Simplified API (8 tools)
+// MCP Tools - 7 tools
 const MCP_TOOLS: Tool[] = [
-  // Process tools (require mide.yaml)
+  // Service tools (require mide.yaml)
   {
-    name: "list_processes",
-    description: "List all processes from mide.yaml with full status, port, URL, and health info",
+    name: "list_services",
+    description: "List all services from mide.yaml with status, port, URL, and health",
     inputSchema: {
       type: "object",
       properties: {},
@@ -284,29 +284,17 @@ const MCP_TOOLS: Tool[] = [
     },
   },
   {
-    name: "manage_process",
-    description: "Start, stop, or restart a process defined in mide.yaml",
+    name: "manage_service",
+    description: "Start, stop, or restart a service defined in mide.yaml",
     inputSchema: {
       type: "object",
       properties: {
-        name: { type: "string", description: "Process name from mide.yaml" },
+        name: { type: "string", description: "Service name from mide.yaml" },
         op: { type: "string", enum: ["start", "stop", "restart"], description: "Operation to perform" },
         args: { type: "string", description: "Additional arguments (for start)" },
         force: { type: "boolean", description: "Kill any process using the port (for start)" },
       },
       required: ["name", "op"],
-    },
-  },
-  {
-    name: "get_logs",
-    description: "Get log output from a process",
-    inputSchema: {
-      type: "object",
-      properties: {
-        name: { type: "string", description: "Process name" },
-        tail: { type: "number", description: "Number of lines to return (default: 100)" },
-      },
-      required: ["name"],
     },
   },
   // Pane tools
@@ -324,8 +312,8 @@ const MCP_TOOLS: Tool[] = [
     },
   },
   {
-    name: "create_interaction",
-    description: "Create an interactive Ink component or form in a pane. Blocks until user completes.",
+    name: "show_user_interaction",
+    description: "Show an interactive Ink component or form to the user. Blocks until user completes.",
     inputSchema: {
       type: "object",
       properties: {
@@ -368,14 +356,26 @@ const MCP_TOOLS: Tool[] = [
   },
   {
     name: "capture_pane",
-    description: "Capture terminal output from a pane",
+    description: "Capture terminal output from a pane or service",
     inputSchema: {
       type: "object",
       properties: {
-        name: { type: "string", description: "Name of the pane" },
+        name: { type: "string", description: "Name of the pane or service" },
         lines: { type: "number", description: "Number of lines to capture (default: 100)" },
+        parse_markers: { type: "boolean", description: "Parse __MCP_PROGRESS__ and __MCP_RESULT__ markers" },
       },
       required: ["name"],
+    },
+  },
+  {
+    name: "get_user_interaction",
+    description: "Get result from a completed interaction (works even if pane was killed)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        interaction_id: { type: "string", description: "Interaction ID from show_user_interaction" },
+      },
+      required: ["interaction_id"],
     },
   },
   // Status tool
@@ -498,11 +498,11 @@ async function main() {
       cwd: configDir,  // Project root for resolving .mide/interactive paths
     });
 
-    // Auto-attach terminal if configured and there are processes to show
-    const hasProcesses = Object.keys(config.processes || {}).length > 0;
-    if (config.settings?.autoAttachTerminal && hasProcesses) {
+    // Auto-attach terminal if configured and there are services to show
+    const hasServices = Object.keys(config.services || {}).length > 0;
+    if (config.settings?.autoAttachTerminal && hasServices) {
       await tmuxManager.openTerminal(config.settings?.terminalApp, configDir);
-    } else if (hasProcesses) {
+    } else if (hasServices) {
       console.error(`[mide] Attach with: tmux attach -t ${tmuxManager.sessionName}`);
     }
   }
@@ -510,18 +510,18 @@ async function main() {
   // Tool handler
   async function handleToolCall(name: string, args: Record<string, unknown>) {
     switch (name) {
-      case "list_processes": {
+      case "list_services": {
         if (!processManager) {
-          return formatToolError("No mide.yaml found - process management not available");
+          return formatToolError("No mide.yaml found - service management not available");
         }
-        const processes = processManager.listProcesses();
-        if (processes.length === 0) {
+        const services = processManager.listProcesses();
+        if (services.length === 0) {
           return {
-            content: [{ type: "text", text: "No processes defined in mide.yaml" }],
+            content: [{ type: "text", text: "No services defined in mide.yaml" }],
           };
         }
         // Return full status including URL
-        const formatted = processes.map((p) => {
+        const formatted = services.map((p) => {
           const proc = processManager!.getProcess(p.name);
           const state = proc?.getState();
           const parts = [`${p.name}: ${p.status}`];
@@ -537,11 +537,11 @@ async function main() {
         };
       }
 
-      case "manage_process": {
+      case "manage_service": {
         if (!processManager) {
-          return formatToolError("No mide.yaml found - process management not available");
+          return formatToolError("No mide.yaml found - service management not available");
         }
-        const parsed = ManageProcessSchema.parse(args);
+        const parsed = ManageServiceSchema.parse(args);
         switch (parsed.op) {
           case "start":
             await processManager.startProcess(parsed.name, {
@@ -549,39 +549,20 @@ async function main() {
               force: parsed.force,
             });
             return {
-              content: [{ type: "text", text: `Process "${parsed.name}" started` }],
+              content: [{ type: "text", text: `Service "${parsed.name}" started` }],
             };
           case "stop":
             await processManager.stopProcess(parsed.name);
             return {
-              content: [{ type: "text", text: `Process "${parsed.name}" stopped` }],
+              content: [{ type: "text", text: `Service "${parsed.name}" stopped` }],
             };
           case "restart":
             await processManager.restartProcess(parsed.name);
             return {
-              content: [{ type: "text", text: `Process "${parsed.name}" restarted` }],
+              content: [{ type: "text", text: `Service "${parsed.name}" restarted` }],
             };
         }
         break;
-      }
-
-      case "get_logs": {
-        if (!processManager) {
-          return formatToolError("No mide.yaml found - process management not available");
-        }
-        const parsed = GetLogsSchema.parse(args);
-        const proc = processManager.getProcess(parsed.name);
-        if (!proc) {
-          return formatToolError(`Process "${parsed.name}" not found`);
-        }
-
-        // Get logs from tmux pane
-        const tail = parsed.tail ?? 100;
-        const content = await proc.getLogsAsync(tail);
-
-        return {
-          content: [{ type: "text", text: content || "(no logs yet)" }],
-        };
       }
 
       case "create_pane": {
@@ -666,23 +647,84 @@ async function main() {
         const parsed = CapturePaneSchema.parse(args);
         const lines = parsed.lines ?? 100;
 
+        let content: string | null = null;
+
         // Try embedded manager first
         if (embeddedTmuxManager?.hasPane(parsed.name)) {
-          const content = await embeddedTmuxManager.capturePane(parsed.name, lines);
+          content = await embeddedTmuxManager.capturePane(parsed.name, lines);
+        } else if (tmuxManager) {
+          // Try standalone tmux manager
+          content = await tmuxManager.capturePane(parsed.name, lines);
+        }
+
+        if (content === null) {
+          return formatToolError("Pane not found or no tmux session active");
+        }
+
+        // Parse markers if requested
+        if (parsed.parse_markers) {
+          const progress: unknown[] = [];
+          let result: unknown = null;
+
+          for (const line of content.split("\n")) {
+            if (line.includes("__MCP_PROGRESS__:")) {
+              const jsonStr = line.split("__MCP_PROGRESS__:")[1];
+              try {
+                progress.push(JSON.parse(jsonStr));
+              } catch { /* ignore parse errors */ }
+            }
+            if (line.includes("__MCP_RESULT__:")) {
+              const jsonStr = line.split("__MCP_RESULT__:")[1];
+              try {
+                result = JSON.parse(jsonStr);
+              } catch { /* ignore parse errors */ }
+            }
+          }
+
           return {
-            content: [{ type: "text", text: content || "(no output)" }],
+            content: [{
+              type: "text",
+              text: JSON.stringify({ progress, result, raw: content }),
+            }],
           };
         }
 
-        // Try standalone tmux manager
-        if (tmuxManager) {
-          const content = await tmuxManager.capturePane(parsed.name, lines);
+        return {
+          content: [{ type: "text", text: content || "(no output)" }],
+        };
+      }
+
+      case "get_user_interaction": {
+        if (!interactionManager) {
+          return formatToolError("Interaction tools not available - tmux required");
+        }
+
+        const parsed = GetUserInteractionSchema.parse(args);
+        const state = interactionManager.getState(parsed.interaction_id);
+
+        // Check in-memory state first
+        if (state?.result) {
           return {
-            content: [{ type: "text", text: content || "(no output)" }],
+            content: [{ type: "text", text: JSON.stringify(state.result) }],
           };
         }
 
-        return formatToolError("Pane not found or no tmux session active");
+        // Try reading from file directly (handles case where pane was killed)
+        const filePath = `/tmp/mcp-interaction-${parsed.interaction_id}.result`;
+        try {
+          if (existsSync(filePath)) {
+            const fileContent = readFileSync(filePath, "utf-8");
+            const result = JSON.parse(fileContent);
+            return {
+              content: [{ type: "text", text: JSON.stringify(result) }],
+            };
+          }
+        } catch { /* ignore read errors */ }
+
+        // Still pending or not found
+        return {
+          content: [{ type: "text", text: JSON.stringify({ status: "pending" }) }],
+        };
       }
 
       case "set_status": {
@@ -728,9 +770,9 @@ async function main() {
     if (processManager) {
       tools = [...MCP_TOOLS];
     } else if (embeddedTmuxManager) {
-      // Embedded mode: pane tools only (no process management)
+      // Embedded mode: pane tools only (no service management)
       tools = MCP_TOOLS.filter(t =>
-        ["create_pane", "create_interaction", "remove_pane", "capture_pane", "set_status"].includes(t.name)
+        ["create_pane", "show_user_interaction", "remove_pane", "capture_pane", "get_user_interaction", "set_status"].includes(t.name)
       );
     }
     // Minimal mode: no tools (tmux not available)
@@ -797,13 +839,13 @@ async function main() {
         };
       }
 
-      // Handle create_interaction (needs server access for progress notifications)
-      if (name === "create_interaction") {
+      // Handle show_user_interaction (needs server access for progress notifications)
+      if (name === "show_user_interaction") {
         if (!interactionManager) {
           return formatToolError("Interaction tools not available - tmux required");
         }
 
-        const parsed = CreateInteractionSchema.parse(args);
+        const parsed = ShowUserInteractionSchema.parse(args);
 
         if (!parsed.schema && !parsed.ink_file) {
           return formatToolError("Either schema or ink_file is required");
@@ -828,7 +870,7 @@ async function main() {
         const startTime = Date.now();
         let heartbeatCount = 0;
 
-        console.error(`[mide] create_interaction: id=${interactionId}, progressToken=${progressToken}`);
+        console.error(`[mide] show_user_interaction: id=${interactionId}, progressToken=${progressToken}`);
 
         while (true) {
           // Wait for result with short timeout
@@ -937,7 +979,7 @@ async function main() {
 
   console.error("[mide] MCP server running");
   if (processManager && tmuxManager) {
-    console.error(`[mide] Managing ${processManager.listProcesses().length} processes in tmux session: ${tmuxManager.sessionName}`);
+    console.error(`[mide] Managing ${processManager.listProcesses().length} services in tmux session: ${tmuxManager.sessionName}`);
   }
 }
 

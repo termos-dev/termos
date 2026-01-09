@@ -1,6 +1,6 @@
 # mcp-ide
 
-Interactive Development Environment for Claude Code. Create terminal/process panes, show interactive Ink components & forms, manage dev servers, build TUI dashboards.
+Interactive Development Environment for Claude Code. Create terminal panes, show interactive Ink components & forms, manage dev services, build TUI dashboards.
 
 ## Installation
 
@@ -18,7 +18,7 @@ npx mcp-ide
 1. Create an `mide.yaml` in your project:
 
 ```yaml
-processes:
+services:
   api:
     command: npm run dev
     port: 3000
@@ -52,22 +52,22 @@ processes:
 
 ## MCP Tools (8 total)
 
-### Process Management
+### Service Management
 
 | Tool | Description |
 |------|-------------|
-| `list_processes` | List all processes with status, port, URL, health |
-| `manage_process(name, op)` | Start, stop, or restart a process |
-| `get_logs(name, tail?)` | Get process logs |
+| `list_services` | List all services with status, port, URL, health |
+| `manage_service(name, op)` | Start, stop, or restart a service |
 
 ### Panes
 
 | Tool | Description |
 |------|-------------|
 | `create_pane(name, command)` | Create a terminal pane |
-| `create_interaction(schema?, ink_file?)` | Show interactive Ink form/component |
+| `show_user_interaction(schema?, ink_file?)` | Show interactive Ink form/component to user |
 | `remove_pane(name)` | Remove a pane |
-| `capture_pane(name, lines?)` | Capture terminal output |
+| `capture_pane(name, lines?)` | Capture terminal output (works for panes and services) |
+| `get_user_interaction(id)` | Get result from completed interaction |
 
 ### Status
 
@@ -79,7 +79,7 @@ processes:
 
 **Schema mode** - Define forms inline:
 ```typescript
-create_interaction({
+show_user_interaction({
   schema: {
     questions: [
       { question: "What's your name?", header: "Name", inputType: "text" },
@@ -96,7 +96,7 @@ create_interaction({
 
 **File mode** - Run custom Ink components:
 ```typescript
-create_interaction({
+show_user_interaction({
   ink_file: "color-picker.tsx",  // Relative to .mide/interactive/
   title: "Pick a Color"
 })
@@ -157,7 +157,7 @@ See `.mide/interactive/color-picker.tsx` for a complete example.
 
 ## Configuration
 
-### Process Options
+### Service Options
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
@@ -170,13 +170,13 @@ See `.mide/interactive/color-picker.tsx` for a complete example.
 | `restartPolicy` | string | "onFailure" | `always`, `onFailure`, or `never` |
 | `maxRestarts` | number | 5 | Max restart attempts |
 | `healthCheck` | string | none | HTTP path for health checks |
-| `dependsOn` | string/array | none | Process dependencies |
+| `dependsOn` | string/array | none | Service dependencies |
 
 ### Settings
 
 ```yaml
 settings:
-  logBufferSize: 1000        # Log lines to keep per process
+  logBufferSize: 1000        # Log lines to keep per service
   healthCheckInterval: 10000  # Health check interval (ms)
   autoAttachTerminal: true    # Auto-open terminal on start
   terminalApp: auto           # auto, ghostty, iterm, kitty, terminal
@@ -202,7 +202,7 @@ layout:
 ### Dependencies
 
 ```yaml
-processes:
+services:
   db:
     command: docker compose up postgres
     port: 5432

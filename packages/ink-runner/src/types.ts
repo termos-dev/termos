@@ -37,6 +37,16 @@ export interface FormResult {
  */
 export const RESULT_PREFIX = "__MCP_RESULT__:";
 
+/**
+ * Progress protocol: Print this to stdout for intermediate updates
+ * Allows Claude to track form progress via capture_pane
+ */
+export const PROGRESS_PREFIX = "__MCP_PROGRESS__:";
+
+export function emitProgress(data: Record<string, unknown>): void {
+  console.log(`${PROGRESS_PREFIX}${JSON.stringify(data)}`);
+}
+
 export function emitResult(result: FormResult): void {
   console.log(`${RESULT_PREFIX}${JSON.stringify(result)}`);
 }
