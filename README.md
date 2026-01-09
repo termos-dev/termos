@@ -41,18 +41,24 @@ services:
 ## CLI Commands
 
 ```bash
+# Session management
+mcp-ide up                    # Start session and services
+mcp-ide down                  # Stop session and services
+mcp-ide attach                # Attach to tmux session
+mcp-ide sessions              # List active sessions
+
+# Service management (requires running session)
 mcp-ide ls                    # List services with status
 mcp-ide start <service>       # Start a service
 mcp-ide stop <service>        # Stop a service
 mcp-ide restart <service>     # Restart a service
 mcp-ide logs <name>           # Capture pane/service output
+
+# Panes and interaction
 mcp-ide pane <name> <cmd>     # Create terminal pane
 mcp-ide rm <name>             # Remove a pane
-mcp-ide status <status>       # Set window status
 mcp-ide ask <question>        # Ask user a question
 mcp-ide ink <file.tsx>        # Run custom Ink component
-mcp-ide attach [session]      # Attach to tmux session
-mcp-ide sessions              # List active sessions
 ```
 
 ## Use Cases

@@ -15,7 +15,7 @@ import { ProcessManager } from "./process-manager.js";
 import { TmuxManager, EmbeddedTmuxManager, isTmuxAvailable, listIdeSessions, isInsideTmux } from "./tmux-manager.js";
 import { InteractionManager } from "./interaction-manager.js";
 
-type Command = "server" | "sessions" | "attach" | "help" | "cli-tool";
+type Command = "server" | "sessions" | "attach" | "help" | "cli-tool" | "up" | "down";
 
 // CLI command definitions - maps CLI aliases to tool names and arg parsers
 const CLI_COMMANDS: Record<string, {
@@ -123,6 +123,8 @@ function parseArgs(): ParsedArgs {
   if (firstArg === "server") return { command: "server", config };
   if (firstArg === "sessions") return { command: "sessions" };
   if (firstArg === "attach") return { command: "attach", sessionName: args[1], paneName: args[2] };
+  if (firstArg === "up") return { command: "up" };
+  if (firstArg === "down") return { command: "down" };
   if (firstArg === "help" || firstArg === "--help" || firstArg === "-h") return { command: "help" };
 
   // CLI tool commands
@@ -160,9 +162,11 @@ function showHelp(): void {
 mcp-ide - Interactive Development Environment for Claude Code
 
 Usage:
+  mcp-ide up                  Start session and services (creates tmux)
+  mcp-ide down                Stop services and kill session
+  mcp-ide attach [session]    Attach to tmux session
+  mcp-ide sessions            List active sessions
   mcp-ide [options]           Start MCP server (default)
-  mcp-ide sessions            List active IDE tmux sessions
-  mcp-ide attach [session] [pane]  Attach to session, optionally select pane
 
 CLI Commands:
 ${cliCmdsHelp}
@@ -624,6 +628,74 @@ async function main() {
       await commandAttach(parsedArgs.sessionName, parsedArgs.paneName);
       // attach() doesn't return - it replaces the process
       break;
+
+    case "up": {
+      // Start session and services
+      if (!configExists()) {
+        console.error("No mide.yaml found");
+        process.exit(1);
+      }
+      const upConfig = await loadConfig();
+      const upDefaultName = path.basename(upConfig.configDir);
+      const upSessionName = upConfig.config.settings?.sessionName
+        ? expandEnvVars(upConfig.config.settings.sessionName)
+        : upDefaultName;
+      const upLayout = upConfig.config.layout ?? upConfig.config.settings?.layout;
+      const upTmux = new TmuxManager(upSessionName, {
+        sessionPrefix: upConfig.config.settings?.tmuxSessionPrefix,
+        layout: upLayout,
+      });
+
+      if (await upTmux.sessionExists()) {
+        console.log(`Session ${upTmux.sessionName} already running`);
+        console.log(`Attach with: mcp-ide attach`);
+        process.exit(0);
+      }
+
+      await upTmux.createSession();
+      console.log(`Created session: ${upTmux.sessionName}`);
+
+      const upPm = new ProcessManager(upConfig.configDir, {
+        settings: upConfig.config.settings,
+        tmuxManager: upTmux,
+      });
+      await upPm.startAll(upConfig.config);
+
+      const services = upPm.listProcesses();
+      console.log(`Started ${services.filter(s => s.status === "running").length}/${services.length} services`);
+      console.log(`Attach with: mcp-ide attach`);
+
+      // Open terminal if configured
+      if (upConfig.config.settings?.autoAttachTerminal) {
+        upTmux.openTerminal();
+      }
+      process.exit(0);
+    }
+
+    case "down": {
+      // Stop services and kill session
+      if (!configExists()) {
+        console.error("No mide.yaml found");
+        process.exit(1);
+      }
+      const downConfig = await loadConfig();
+      const downDefaultName = path.basename(downConfig.configDir);
+      const downSessionName = downConfig.config.settings?.sessionName
+        ? expandEnvVars(downConfig.config.settings.sessionName)
+        : downDefaultName;
+      const downTmux = new TmuxManager(downSessionName, {
+        sessionPrefix: downConfig.config.settings?.tmuxSessionPrefix,
+      });
+
+      if (!(await downTmux.sessionExists())) {
+        console.log(`No active session for ${downSessionName}`);
+        process.exit(0);
+      }
+
+      await downTmux.destroySession();
+      console.log(`Stopped session: ${downTmux.sessionName}`);
+      process.exit(0);
+    }
 
     case "cli-tool": {
       // Execute CLI tool command
