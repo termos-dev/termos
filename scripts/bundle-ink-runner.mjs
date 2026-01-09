@@ -60,6 +60,12 @@ async function bundle() {
     path.join(inkRunnerDest, 'package.json')
   );
 
+  // Copy built-in components
+  const componentsDir = path.join(inkRunnerSrc, 'components');
+  if (fs.existsSync(componentsDir)) {
+    copyDir(componentsDir, path.join(inkRunnerDest, 'components'));
+  }
+
   // Calculate size
   const getSize = (dir) => {
     let size = 0;

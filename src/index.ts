@@ -116,6 +116,27 @@ interface ParsedArgs {
   toolArgs?: Record<string, unknown>;
 }
 
+/**
+ * Load config and create TmuxManager - reusable helper to avoid duplication
+ */
+async function loadConfigAndTmux(configPath?: string): Promise<{
+  config: Awaited<ReturnType<typeof loadConfig>>;
+  tmux: TmuxManager;
+  sessionName: string;
+}> {
+  const loaded = await loadConfig(configPath);
+  const defaultName = path.basename(loaded.configDir);
+  const sessionName = loaded.config.settings?.sessionName
+    ? expandEnvVars(loaded.config.settings.sessionName)
+    : defaultName;
+  const layout = loaded.config.layout ?? loaded.config.settings?.layout;
+  const tmux = new TmuxManager(sessionName, {
+    sessionPrefix: loaded.config.settings?.tmuxSessionPrefix,
+    layout,
+  });
+  return { config: loaded, tmux, sessionName };
+}
+
 // Parse CLI arguments
 function parseArgs(): ParsedArgs {
   const args = process.argv.slice(2);
@@ -663,16 +684,7 @@ async function main() {
         console.error("No mide.yaml found");
         process.exit(1);
       }
-      const upConfig = await loadConfig();
-      const upDefaultName = path.basename(upConfig.configDir);
-      const upSessionName = upConfig.config.settings?.sessionName
-        ? expandEnvVars(upConfig.config.settings.sessionName)
-        : upDefaultName;
-      const upLayout = upConfig.config.layout ?? upConfig.config.settings?.layout;
-      const upTmux = new TmuxManager(upSessionName, {
-        sessionPrefix: upConfig.config.settings?.tmuxSessionPrefix,
-        layout: upLayout,
-      });
+      const { config: upLoaded, tmux: upTmux } = await loadConfigAndTmux();
 
       if (await upTmux.sessionExists()) {
         console.log(`Session ${upTmux.sessionName} already running`);
@@ -683,18 +695,17 @@ async function main() {
       await upTmux.createSession();
       console.log(`Created session: ${upTmux.sessionName}`);
 
-      const upPm = new ProcessManager(upConfig.configDir, {
-        settings: upConfig.config.settings,
+      const upPm = new ProcessManager(upLoaded.configDir, {
+        settings: upLoaded.config.settings,
         tmuxManager: upTmux,
       });
-      await upPm.startAll(upConfig.config);
+      await upPm.startAll(upLoaded.config);
 
       const services = upPm.listProcesses();
       console.log(`Started ${services.filter(s => s.status === "running").length}/${services.length} services`);
       console.log(`Attach with: mcp-ide attach`);
 
-      // Open terminal if configured
-      if (upConfig.config.settings?.autoAttachTerminal) {
+      if (upLoaded.config.settings?.autoAttachTerminal) {
         upTmux.openTerminal();
       }
       process.exit(0);
@@ -706,14 +717,7 @@ async function main() {
         console.error("No mide.yaml found");
         process.exit(1);
       }
-      const downConfig = await loadConfig();
-      const downDefaultName = path.basename(downConfig.configDir);
-      const downSessionName = downConfig.config.settings?.sessionName
-        ? expandEnvVars(downConfig.config.settings.sessionName)
-        : downDefaultName;
-      const downTmux = new TmuxManager(downSessionName, {
-        sessionPrefix: downConfig.config.settings?.tmuxSessionPrefix,
-      });
+      const { tmux: downTmux, sessionName: downSessionName } = await loadConfigAndTmux();
 
       if (!(await downTmux.sessionExists())) {
         console.log(`No active session for ${downSessionName}`);
@@ -740,7 +744,6 @@ async function main() {
       const serviceTools = ["list_services", "manage_service"];
       const needsServices = serviceTools.includes(parsedArgs.toolName);
 
-      // Initialize managers for CLI mode
       const hasConfig = configExists();
       if (!hasConfig && needsServices) {
         console.error("No mide.yaml found - service management not available");
@@ -751,30 +754,20 @@ async function main() {
       let cliTmuxManager: TmuxManager | undefined;
 
       if (hasConfig && !isStandalone) {
-        const loaded = await loadConfig();
-        const defaultName = path.basename(loaded.configDir);
-        const sessionName = loaded.config.settings?.sessionName
-          ? expandEnvVars(loaded.config.settings.sessionName)
-          : defaultName;
-        const layout = loaded.config.layout ?? loaded.config.settings?.layout;
-        cliTmuxManager = new TmuxManager(sessionName, {
-          sessionPrefix: loaded.config.settings?.tmuxSessionPrefix,
-          layout,
-        });
+        const { config: cliLoaded, tmux, sessionName } = await loadConfigAndTmux();
+        cliTmuxManager = tmux;
 
-        // Don't create new session for CLI, connect to existing
         if (!(await cliTmuxManager.sessionExists())) {
-          console.error(`No active session for ${sessionName}. Start with: mcp-ide`);
+          console.error(`No active session for ${sessionName}. Start with: mcp-ide up`);
           process.exit(1);
         }
 
-        cliProcessManager = new ProcessManager(loaded.configDir, {
-          settings: loaded.config.settings,
+        cliProcessManager = new ProcessManager(cliLoaded.configDir, {
+          settings: cliLoaded.config.settings,
           tmuxManager: cliTmuxManager,
         });
       }
 
-      // Execute the tool
       const result = await executeCLITool(
         parsedArgs.toolName,
         parsedArgs.toolArgs,
@@ -833,21 +826,10 @@ async function main() {
   }
 
   if (hasConfig) {
-    const loaded = await loadConfig(parsedArgs.config);
+    const { config: loaded, tmux } = await loadConfigAndTmux(parsedArgs.config);
     config = loaded.config;
     configDir = loaded.configDir;
-
-    // Create tmux session with project name
-    const defaultName = path.basename(configDir);
-    const sessionName = config.settings?.sessionName
-      ? expandEnvVars(config.settings.sessionName)
-      : defaultName;
-    // Top-level layout takes precedence over settings.layout
-    const layout = config.layout ?? config.settings?.layout;
-    tmuxManager = new TmuxManager(sessionName, {
-      sessionPrefix: config.settings?.tmuxSessionPrefix,
-      layout,
-    });
+    tmuxManager = tmux;
     await tmuxManager.createSession();
 
     console.error(`[mide] Created tmux session: ${tmuxManager.sessionName}`);
