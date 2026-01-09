@@ -1,6 +1,6 @@
 # mcp-ide
 
-Interactive Development Environment for Claude Code. Create terminal panes, show interactive Ink components & forms, manage dev services, build TUI dashboards.
+Interactive Development Environment for Claude Code. Manage dev services, create terminal panes, show interactive forms.
 
 ## Installation
 
@@ -8,14 +8,9 @@ Interactive Development Environment for Claude Code. Create terminal panes, show
 npm install -g mcp-ide
 ```
 
-Or use with npx:
-```bash
-npx mcp-ide
-```
-
 ## Quick Start
 
-1. Create an `mide.yaml` in your project:
+1. Create `mide.yaml` in your project:
 
 ```yaml
 services:
@@ -28,7 +23,7 @@ services:
     cwd: ./frontend
 ```
 
-2. Add to your Claude Code MCP config:
+2. Add to Claude Code MCP config (`~/.claude.json`):
 
 ```json
 {
@@ -41,176 +36,97 @@ services:
 }
 ```
 
-3. Use `/ide:start` or ask Claude to manage your dev environment:
+3. Ask Claude to manage your dev environment or use CLI directly.
 
+## CLI Commands
+
+```bash
+mcp-ide ls                    # List services with status
+mcp-ide start <service>       # Start a service
+mcp-ide stop <service>        # Stop a service
+mcp-ide restart <service>     # Restart a service
+mcp-ide logs <name>           # Capture pane/service output
+mcp-ide pane <name> <cmd>     # Create terminal pane
+mcp-ide rm <name>             # Remove a pane
+mcp-ide status <status>       # Set window status
+mcp-ide attach [session]      # Attach to tmux session
+mcp-ide sessions              # List active sessions
 ```
-> /ide:start
-> "start my dev servers"
-> "show me the API logs"
-> "restart the frontend"
+
+## Use Cases
+
+| Use Case | CLI | MCP Tool |
+|----------|-----|----------|
+| Check service status | `mcp-ide ls` | `list_services` |
+| Start/stop services | `mcp-ide start api` | `manage_service` |
+| View logs | `mcp-ide logs api` | `capture_pane` |
+| Run one-off command | `mcp-ide pane build "npm run build"` | `create_pane` |
+| Ask user a question | - | `show_user_interaction` |
+| Custom Ink component | - | `show_user_interaction` |
+
+## Service Configuration
+
+```yaml
+services:
+  api:
+    command: npm run dev       # Required: shell command
+    cwd: ./backend             # Working directory
+    port: 3000                 # Fixed port (injected as $PORT)
+    autoStart: true            # Start on boot (default: true)
+    env:                       # Environment variables
+      NODE_ENV: development
+    envFile: .env              # Load from .env file
+    restartPolicy: onFailure   # always | onFailure | never
+    healthCheck: /health       # HTTP health check path
+    dependsOn: db              # Wait for dependency
 ```
 
-## MCP Tools (8 total)
+## Settings
 
-### Service Management
+```yaml
+settings:
+  layout: grid                # grid | horizontal | vertical | main-left | main-top
+  autoAttachTerminal: true    # Auto-open terminal window
+  terminalApp: auto           # auto | ghostty | iterm | kitty | terminal
+```
 
-| Tool | Description |
-|------|-------------|
-| `list_services` | List all services with status, port, URL, health |
-| `manage_service(name, op)` | Start, stop, or restart a service |
+## Interactive Forms
 
-### Panes
+Show forms to collect user input:
 
-| Tool | Description |
-|------|-------------|
-| `create_pane(name, command)` | Create a terminal pane |
-| `show_user_interaction(schema?, ink_file?)` | Show interactive Ink form/component to user |
-| `remove_pane(name)` | Remove a pane |
-| `capture_pane(name, lines?)` | Capture terminal output (works for panes and services) |
-| `get_user_interaction(id)` | Get result from completed interaction |
-
-### Status
-
-| Tool | Description |
-|------|-------------|
-| `set_status(status, message?)` | Update window title/status |
-
-## Interactive Ink Components
-
-**Schema mode** - Define forms inline:
 ```typescript
 show_user_interaction({
   schema: {
     questions: [
-      { question: "What's your name?", header: "Name", inputType: "text" },
-      { question: "Select role", header: "Role", options: [
-        { label: "Developer" },
-        { label: "Designer" }
+      { question: "Project name?", header: "Name", inputType: "text" },
+      { question: "Language?", header: "Lang", options: [
+        { label: "TypeScript" },
+        { label: "Python" }
       ]}
     ]
-  },
-  title: "User Setup"
+  }
 })
-// Returns: { action: "accept", answers: { Name: "John", Role: "Developer" } }
 ```
 
-**File mode** - Run custom Ink components:
-```typescript
-show_user_interaction({
-  ink_file: "color-picker.tsx",  // Relative to .mide/interactive/
-  title: "Pick a Color"
-})
-// Returns: { action: "accept", result: { color: "blue" } }
-```
+## Custom Ink Components
 
-## Writing Ink Components
-
-Create `.tsx` files in `.mide/interactive/` (project) or `~/.mide/interactive/` (global):
+Create `.tsx` files in `.mide/interactive/`:
 
 ```tsx
-import { Box, Text, useInput, useApp } from 'ink';
-import { useState } from 'react';
+import { Text, useInput, useApp } from 'ink';
 
 declare const onComplete: (result: unknown) => void;
 
-function ColorPicker() {
+export default function() {
   const { exit } = useApp();
-  const [selected, setSelected] = useState(0);
-  const colors = ['red', 'green', 'blue'];
-
-  useInput((input, key) => {
-    if (key.upArrow) setSelected(s => (s - 1 + colors.length) % colors.length);
-    if (key.downArrow) setSelected(s => (s + 1) % colors.length);
-    if (key.return) {
-      onComplete({ color: colors[selected] });
-      exit();
-    }
-    if (key.escape) {
-      onComplete({ cancelled: true });
-      exit();
-    }
+  useInput((_, key) => {
+    if (key.return) { onComplete({ done: true }); exit(); }
   });
-
-  return (
-    <Box flexDirection="column">
-      <Text bold>Pick a color:</Text>
-      {colors.map((color, i) => (
-        <Text key={color} color={i === selected ? 'cyan' : 'white'}>
-          {i === selected ? '> ' : '  '}{color}
-        </Text>
-      ))}
-    </Box>
-  );
+  return <Text>Press Enter</Text>;
 }
-
-export default ColorPicker;
 ```
 
-**Available imports:** `ink`, `ink-text-input`, `ink-select-input`, `react`
-
-**Key patterns:**
-- `onComplete(data)` - Return result to Claude (global function)
-- `useApp().exit()` - Close the component
-- `useInput((input, key) => {...})` - Handle keyboard
-
-See `.mide/interactive/color-picker.tsx` for a complete example.
-
-## Configuration
-
-### Service Options
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `command` | string | required | Shell command to run |
-| `cwd` | string | config dir | Working directory |
-| `port` | number | auto-detect | Fixed port (injected as `$PORT`) |
-| `autoStart` | boolean | true | Start automatically |
-| `env` | object | {} | Environment variables |
-| `envFile` | string | none | Path to .env file |
-| `restartPolicy` | string | "onFailure" | `always`, `onFailure`, or `never` |
-| `maxRestarts` | number | 5 | Max restart attempts |
-| `healthCheck` | string | none | HTTP path for health checks |
-| `dependsOn` | string/array | none | Service dependencies |
-
-### Settings
-
-```yaml
-settings:
-  logBufferSize: 1000        # Log lines to keep per service
-  healthCheckInterval: 10000  # Health check interval (ms)
-  autoAttachTerminal: true    # Auto-open terminal on start
-  terminalApp: auto           # auto, ghostty, iterm, kitty, terminal
-  layout: grid                # grid, horizontal, vertical, main-left, main-top
-```
-
-### Layout
-
-```yaml
-# Simple presets
-layout: grid        # Automatic grid (default)
-layout: horizontal  # Side by side
-layout: vertical    # Stacked
-
-# Grouped layouts
-layout:
-  type: rows
-  groups:
-    servers: [frontend, backend]
-    tools: [worker, api]
-```
-
-### Dependencies
-
-```yaml
-services:
-  db:
-    command: docker compose up postgres
-    port: 5432
-
-  api:
-    command: npm run dev
-    dependsOn: db
-```
+Run with: `show_user_interaction({ ink_file: "my-component.tsx" })`
 
 ## License
 

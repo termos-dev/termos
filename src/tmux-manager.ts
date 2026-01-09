@@ -908,6 +908,31 @@ export class TmuxManager {
   }
 
   /**
+   * Select a pane by name (for CLI attach with specific pane)
+   */
+  async selectPane(paneName: string): Promise<boolean> {
+    const paneId = this.paneMap.get(paneName);
+    if (!paneId) {
+      // Try to find by listing all panes
+      const panes = await this.listPanes();
+      const match = panes.find(p => p.paneId === paneName);
+      if (!match) {
+        console.error(`[mide] Pane "${paneName}" not found`);
+        return false;
+      }
+    }
+
+    const targetId = paneId || paneName;
+    try {
+      await execFileAsync("tmux", ["select-pane", "-t", targetId]);
+      return true;
+    } catch (err) {
+      console.error(`[mide] Failed to select pane: ${err}`);
+      return false;
+    }
+  }
+
+  /**
    * Attach to the session (for CLI use)
    */
   attach(): void {

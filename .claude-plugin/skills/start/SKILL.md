@@ -1,127 +1,60 @@
 ---
 name: start
-description: "Start dev environment, create terminals/panes, show Ink components and interactive forms, manage services. Triggers: start dev, run server, create terminal, open pane, ink component, ask question, show form, interactive input, service status, dashboard, TUI."
-allowed-tools: mcp__plugin_ide_ide__*
+description: "Start dev environment, manage services, create terminals. Triggers: start dev, run server, service status, logs, restart."
+allowed-tools: Bash, mcp__plugin_ide_ide__*
 ---
 
 # IDE Start Skill
 
-Start and manage your development environment with terminals, services, interactive Ink components, and dashboards.
+Manage dev services and terminal panes. **Prefer CLI commands** over MCP tools - they're more composable and can be chained.
 
-## Tools (8 total)
+## CLI Commands (Recommended)
 
-### Service Management (require mide.yaml)
-
-| Tool | Description |
-|------|-------------|
-| `list_services` | List all services with status, port, URL, health |
-| `manage_service(name, op)` | Start, stop, or restart a service |
-
-### Pane Management
-
-| Tool | Description |
-|------|-------------|
-| `create_pane(name, command)` | Create a terminal pane |
-| `show_user_interaction(schema?, ink_file?)` | Show interactive Ink form/component to user |
-| `remove_pane(name)` | Remove a pane |
-| `capture_pane(name, lines?)` | Capture terminal output from pane or service |
-| `get_user_interaction(id)` | Get result from completed interaction |
-
-### Status
-
-| Tool | Description |
-|------|-------------|
-| `set_status(status, message?)` | Update window title/status |
-
-## Starting the Environment
-
-```
-list_services()  // Initializes tmux session, shows all services
-```
-
-## Managing Services
-
-```
-manage_service(name: "api", op: "start")
-manage_service(name: "api", op: "stop")
-manage_service(name: "api", op: "restart")
-```
-
-## Creating Terminal Panes
-
-```
-create_pane(name: "dev-server", command: "npm run dev")
-create_pane(name: "tests", command: "npm test --watch")
-```
-
-## Interactive Ink Components
-
-**Schema mode** - Define forms inline:
-```
-show_user_interaction(
-  schema: {
-    questions: [
-      { question: "What's your name?", header: "Name", inputType: "text" },
-      { question: "Select role", header: "Role", options: [
-        { label: "Developer" },
-        { label: "Designer" }
-      ]}
-    ]
-  },
-  title: "User Setup"
-)
-```
-
-**File mode** - Run custom Ink components:
-```
-show_user_interaction(ink_file: "color-picker.tsx", title: "Pick a Color")
-```
-
-File resolution: `.mide/interactive/` → `~/.mide/interactive/`
-
-## Writing Ink Components
-
-Create `.tsx` files in `.mide/interactive/`:
-
-```tsx
-import { Box, Text, useInput, useApp } from 'ink';
-import { useState } from 'react';
-
-declare const onComplete: (result: unknown) => void;
-
-function MyComponent() {
-  const { exit } = useApp();
-
-  useInput((input, key) => {
-    if (key.return) {
-      onComplete({ value: "done" });
-      exit();
-    }
-  });
-
-  return <Text>Press Enter to confirm</Text>;
-}
-
-export default MyComponent;
-```
-
-**Available imports:** `ink`, `ink-text-input`, `ink-select-input`, `react`
-
-## Capturing Output
-
-```
-capture_pane(name: "dev-server", lines: 50)
-// Returns last 50 lines of terminal output
-// Works for both panes and services
+```bash
+mcp-ide ls                    # List services with status
+mcp-ide start <service>       # Start a service
+mcp-ide stop <service>        # Stop a service
+mcp-ide restart <service>     # Restart a service
+mcp-ide logs <name>           # Get terminal output
+mcp-ide pane <name> <cmd>     # Create terminal pane
+mcp-ide rm <name>             # Remove a pane
+mcp-ide attach [session]      # Attach to tmux session
 ```
 
 ## When to Use
 
-| User Intent | Tool |
-|-------------|------|
-| "start dev environment" | `list_services` |
-| "run a command" | `create_pane` |
-| "ask user a question" | `show_user_interaction` with schema |
-| "show a picker" | `show_user_interaction` with ink_file |
-| "what's in the terminal" | `capture_pane` |
-| "restart the API" | `manage_service(op: "restart")` |
+| User Intent | Command |
+|-------------|---------|
+| "start dev environment" | `mcp-ide ls` |
+| "check service status" | `mcp-ide ls` |
+| "show logs" | `mcp-ide logs <name>` |
+| "restart the API" | `mcp-ide restart api` |
+| "run a command in background" | `mcp-ide pane <name> <cmd>` |
+| "ask user a question" | Use `show_user_interaction` MCP tool |
+
+## MCP Tools (When CLI Won't Work)
+
+Use MCP tools only for interactive features:
+
+- `show_user_interaction` - Show forms or custom Ink components to user
+- `get_user_interaction` - Get result from completed interaction
+- `set_status` - Update window title/status indicator
+
+## Examples
+
+```bash
+# Check all services
+mcp-ide ls
+
+# Restart crashed service
+mcp-ide restart api
+
+# View recent logs
+mcp-ide logs api
+
+# Run build in background
+mcp-ide pane build "npm run build"
+
+# Chain commands
+mcp-ide restart api && mcp-ide logs api
+```

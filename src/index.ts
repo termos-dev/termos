@@ -15,94 +15,142 @@ import { ProcessManager } from "./process-manager.js";
 import { TmuxManager, EmbeddedTmuxManager, isTmuxAvailable, listIdeSessions, isInsideTmux } from "./tmux-manager.js";
 import { InteractionManager } from "./interaction-manager.js";
 
-type Command = "server" | "sessions" | "attach" | "help";
+type Command = "server" | "sessions" | "attach" | "help" | "cli-tool";
+
+// CLI command definitions - maps CLI aliases to tool names and arg parsers
+const CLI_COMMANDS: Record<string, {
+  tool: string;
+  usage: string;
+  parseArgs: (args: string[]) => Record<string, unknown> | null;
+}> = {
+  ls: {
+    tool: "list_services",
+    usage: "mcp-ide ls",
+    parseArgs: () => ({}),
+  },
+  start: {
+    tool: "manage_service",
+    usage: "mcp-ide start <service>",
+    parseArgs: (args) => args[1] ? { name: args[1], op: "start" } : null,
+  },
+  stop: {
+    tool: "manage_service",
+    usage: "mcp-ide stop <service>",
+    parseArgs: (args) => args[1] ? { name: args[1], op: "stop" } : null,
+  },
+  restart: {
+    tool: "manage_service",
+    usage: "mcp-ide restart <service>",
+    parseArgs: (args) => args[1] ? { name: args[1], op: "restart" } : null,
+  },
+  logs: {
+    tool: "capture_pane",
+    usage: "mcp-ide logs <name> [--lines N]",
+    parseArgs: (args) => {
+      if (!args[1]) return null;
+      const linesIdx = args.indexOf("--lines");
+      const lines = linesIdx !== -1 && args[linesIdx + 1] ? parseInt(args[linesIdx + 1], 10) : 100;
+      return { name: args[1], lines };
+    },
+  },
+  pane: {
+    tool: "create_pane",
+    usage: "mcp-ide pane <name> <command>",
+    parseArgs: (args) => args[1] && args[2] ? { name: args[1], command: args.slice(2).join(" ") } : null,
+  },
+  rm: {
+    tool: "remove_pane",
+    usage: "mcp-ide rm <name>",
+    parseArgs: (args) => args[1] ? { name: args[1] } : null,
+  },
+  status: {
+    tool: "set_status",
+    usage: "mcp-ide status <status> [message]",
+    parseArgs: (args) => ({ status: args[1] || "running", message: args[2] }),
+  },
+};
 
 interface ParsedArgs {
   command: Command;
   config?: string;
   sessionName?: string;
+  paneName?: string;
+  toolName?: string;
+  toolArgs?: Record<string, unknown>;
 }
 
 // Parse CLI arguments
 function parseArgs(): ParsedArgs {
   const args = process.argv.slice(2);
   let config: string | undefined;
-  let sessionName: string | undefined;
-
-  // Check for subcommand
   const firstArg = args[0];
 
   if (!firstArg || firstArg.startsWith("-")) {
-    // No subcommand, default to server mode
-    // Parse remaining flags
     for (let i = 0; i < args.length; i++) {
       const arg = args[i];
-      if (arg === "--help" || arg === "-h") {
-        return { command: "help" };
-      } else if (arg === "--config" || arg === "-c") {
+      if (arg === "--help" || arg === "-h") return { command: "help" };
+      if (arg === "--config" || arg === "-c") {
         config = args[++i];
-        if (!config) {
-          console.error("Error: --config requires a path argument");
-          process.exit(1);
-        }
+        if (!config) { console.error("Error: --config requires a path"); process.exit(1); }
       }
     }
     return { command: "server", config };
   }
 
-  // Handle subcommands
-  switch (firstArg) {
-    case "sessions":
-      return { command: "sessions" };
+  // Built-in commands
+  if (firstArg === "server") return { command: "server", config };
+  if (firstArg === "sessions") return { command: "sessions" };
+  if (firstArg === "attach") return { command: "attach", sessionName: args[1], paneName: args[2] };
+  if (firstArg === "help" || firstArg === "--help" || firstArg === "-h") return { command: "help" };
 
-    case "attach":
-      sessionName = args[1];
-      return { command: "attach", sessionName };
-
-    case "help":
-    case "--help":
-    case "-h":
-      return { command: "help" };
-
-    default:
-      // Unknown arg, might be a flag for server mode
-      if (firstArg.startsWith("-")) {
-        for (let i = 0; i < args.length; i++) {
-          const arg = args[i];
-          if (arg === "--help" || arg === "-h") {
-            return { command: "help" };
-          } else if (arg === "--config" || arg === "-c") {
-            config = args[++i];
-          }
-        }
-        return { command: "server", config };
-      }
-      console.error(`Unknown command: ${firstArg}`);
-      console.error("Run 'mcp-ide help' for usage");
+  // CLI tool commands
+  const cliCmd = CLI_COMMANDS[firstArg];
+  if (cliCmd) {
+    const toolArgs = cliCmd.parseArgs(args);
+    if (toolArgs === null) {
+      console.error(`Usage: ${cliCmd.usage}`);
       process.exit(1);
+    }
+    return { command: "cli-tool", toolName: cliCmd.tool, toolArgs };
   }
+
+  // Unknown command
+  if (firstArg.startsWith("-")) {
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === "--help" || args[i] === "-h") return { command: "help" };
+      if (args[i] === "--config" || args[i] === "-c") config = args[++i];
+    }
+    return { command: "server", config };
+  }
+
+  console.error(`Unknown command: ${firstArg}`);
+  console.error("Run 'mcp-ide help' for usage");
+  process.exit(1);
 }
 
 function showHelp(): void {
+  // Generate CLI commands help from CLI_COMMANDS
+  const cliCmdsHelp = Object.entries(CLI_COMMANDS)
+    .map(([, def]) => `  ${def.usage}`)
+    .join("\n");
+
   console.log(`
-mcp-ide - MCP server for managing development processes
+mcp-ide - Interactive Development Environment for Claude Code
 
 Usage:
   mcp-ide [options]           Start MCP server (default)
   mcp-ide sessions            List active IDE tmux sessions
-  mcp-ide attach [name]       Attach to a tmux session
+  mcp-ide attach [session] [pane]  Attach to session, optionally select pane
+
+CLI Commands:
+${cliCmdsHelp}
 
 Options:
   -h, --help              Show this help message
   -c, --config <path>     Path to mide.yaml config file
 
 Configuration:
-  Create an mide.yaml file in your project root to define processes.
-  Or specify a custom path with --config.
-
-tmux Integration:
-  Processes run in tmux panes for live output viewing.
-  Use 'mcp-ide attach' to see process output in your terminal.
+  Create an mide.yaml file in your project root to define services.
 
 Example mide.yaml:
   services:
@@ -112,7 +160,6 @@ Example mide.yaml:
     frontend:
       command: npm run dev
       cwd: ./frontend
-      port: 5173
 `);
 }
 
@@ -142,9 +189,9 @@ async function commandSessions(): Promise<void> {
 }
 
 /**
- * Attach to a tmux session
+ * Attach to a tmux session, optionally selecting a specific pane
  */
-async function commandAttach(sessionName?: string): Promise<void> {
+async function commandAttach(sessionName?: string, paneName?: string): Promise<void> {
   const sessions = await listIdeSessions();
 
   if (sessions.length === 0) {
@@ -176,7 +223,6 @@ async function commandAttach(sessionName?: string): Promise<void> {
     if (match) {
       targetSession = match.name;
     } else if (sessions.length === 1) {
-      // Only one session, use it
       targetSession = sessions[0].name;
     } else {
       console.error("Multiple sessions available. Please specify which one:");
@@ -185,11 +231,18 @@ async function commandAttach(sessionName?: string): Promise<void> {
     }
   }
 
-  console.log(`Attaching to ${targetSession}...`);
-
   // Create a temporary TmuxManager just to attach
   const tmux = new TmuxManager(targetSession.replace(/^mide-/, ""));
   (tmux as { sessionName: string }).sessionName = targetSession;
+
+  // If pane name specified, select it before attaching
+  if (paneName) {
+    console.log(`Attaching to ${targetSession} (pane: ${paneName})...`);
+    await tmux.selectPane(paneName);
+  } else {
+    console.log(`Attaching to ${targetSession}...`);
+  }
+
   tmux.attach();
 }
 
@@ -202,6 +255,82 @@ function formatAge(date: Date): string {
   if (hours < 24) return `${hours}h`;
   const days = Math.floor(hours / 24);
   return `${days}d`;
+}
+
+/**
+ * Execute a CLI tool command and return the result as a string
+ */
+async function executeCLITool(
+  toolName: string,
+  args: Record<string, unknown>,
+  processManager?: ProcessManager,
+  tmuxManager?: TmuxManager
+): Promise<string> {
+  switch (toolName) {
+    case "list_services": {
+      if (!processManager) return "No services configured";
+      const services = processManager.listProcesses();
+      if (services.length === 0) return "No services defined";
+      return services.map(p => {
+        const proc = processManager.getProcess(p.name);
+        const state = proc?.getState();
+        const parts = [`${p.name}: ${p.status}`];
+        if (p.port) parts.push(`port=${p.port}`);
+        if (state?.url) parts.push(`url=${state.url}`);
+        if (p.healthy !== undefined) parts.push(`healthy=${p.healthy}`);
+        return parts.join(" | ");
+      }).join("\n");
+    }
+
+    case "manage_service": {
+      if (!processManager) return "No services configured";
+      const { name, op } = args as { name: string; op: string };
+      switch (op) {
+        case "start":
+          await processManager.startProcess(name);
+          return `Started ${name}`;
+        case "stop":
+          await processManager.stopProcess(name);
+          return `Stopped ${name}`;
+        case "restart":
+          await processManager.restartProcess(name);
+          return `Restarted ${name}`;
+        default:
+          return `Unknown operation: ${op}`;
+      }
+    }
+
+    case "capture_pane": {
+      const { name, lines } = args as { name: string; lines?: number };
+      if (!tmuxManager) return "No tmux session active";
+      const content = await tmuxManager.capturePane(name, lines ?? 100);
+      return content || "(no output)";
+    }
+
+    case "create_pane": {
+      if (!processManager || !tmuxManager) return "No session active";
+      const { name, command, group } = args as { name: string; command: string; group?: string };
+      const terminal = await processManager.createDynamicTerminal(name, command, group);
+      return `Created pane "${terminal.name}" (${terminal.paneId})`;
+    }
+
+    case "remove_pane": {
+      if (!processManager) return "No session active";
+      const { name } = args as { name: string };
+      await processManager.removeDynamicTerminal(name);
+      return `Removed pane "${name}"`;
+    }
+
+    case "set_status": {
+      if (!tmuxManager) return "No tmux session active";
+      const { status, message } = args as { status: string; message?: string };
+      await tmuxManager.setStatus(status as "pending" | "running" | "completed" | "failed", message);
+      return `Status: ${status}${message ? ` - ${message}` : ""}`;
+    }
+
+    default:
+      return `Unknown tool: ${toolName}`;
+  }
 }
 
 // Service tool schemas
@@ -416,9 +545,58 @@ async function main() {
       break;
 
     case "attach":
-      await commandAttach(parsedArgs.sessionName);
+      await commandAttach(parsedArgs.sessionName, parsedArgs.paneName);
       // attach() doesn't return - it replaces the process
       break;
+
+    case "cli-tool": {
+      // Execute CLI tool command
+      if (!parsedArgs.toolName || !parsedArgs.toolArgs) {
+        console.error("Invalid CLI tool invocation");
+        process.exit(1);
+      }
+
+      // Initialize managers for CLI mode
+      const hasConfig = configExists();
+      if (!hasConfig && ["list_services", "manage_service"].includes(parsedArgs.toolName)) {
+        console.error("No mide.yaml found - service management not available");
+        process.exit(1);
+      }
+
+      let cliProcessManager: ProcessManager | undefined;
+      let cliTmuxManager: TmuxManager | undefined;
+
+      if (hasConfig) {
+        const loaded = await loadConfig();
+        const projectName = path.basename(loaded.configDir);
+        const layout = loaded.config.layout ?? loaded.config.settings?.layout;
+        cliTmuxManager = new TmuxManager(projectName, {
+          sessionPrefix: loaded.config.settings?.tmuxSessionPrefix,
+          layout,
+        });
+
+        // Don't create new session for CLI, connect to existing
+        if (!(await cliTmuxManager.sessionExists())) {
+          console.error(`No active session for ${projectName}. Start with: mcp-ide`);
+          process.exit(1);
+        }
+
+        cliProcessManager = new ProcessManager(loaded.configDir, {
+          settings: loaded.config.settings,
+          tmuxManager: cliTmuxManager,
+        });
+      }
+
+      // Execute the tool
+      const result = await executeCLITool(
+        parsedArgs.toolName,
+        parsedArgs.toolArgs,
+        cliProcessManager,
+        cliTmuxManager
+      );
+      console.log(result);
+      process.exit(0);
+    }
 
     case "server":
       // Continue to MCP server mode below
