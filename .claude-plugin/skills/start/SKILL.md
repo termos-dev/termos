@@ -1,14 +1,14 @@
 ---
 name: start
 description: "Start dev environment, manage services, create terminals. Triggers: start dev, run server, service status, logs, restart."
-allowed-tools: Bash, mcp__plugin_ide_ide__*
+allowed-tools: Bash
 ---
 
 # IDE Start Skill
 
-Manage dev services and terminal panes. **Prefer CLI commands** over MCP tools - they're more composable and can be chained.
+Manage dev services and terminal panes using CLI commands.
 
-## CLI Commands (Recommended)
+## Commands
 
 ```bash
 mcp-ide ls                    # List services with status
@@ -18,7 +18,7 @@ mcp-ide restart <service>     # Restart a service
 mcp-ide logs <name>           # Get terminal output
 mcp-ide pane <name> <cmd>     # Create terminal pane
 mcp-ide rm <name>             # Remove a pane
-mcp-ide ask <question>        # Ask user a question
+mcp-ide ask <question>        # Ask user a question (interactive)
 mcp-ide ink <file.tsx>        # Run custom Ink component
 mcp-ide attach [session]      # Attach to tmux session
 ```
@@ -34,15 +34,6 @@ mcp-ide attach [session]      # Attach to tmux session
 | "run a command in background" | `mcp-ide pane <name> <cmd>` |
 | "ask user a question" | `mcp-ide ask "question?"` |
 | "show a picker/form" | `mcp-ide ink picker.tsx` |
-
-## MCP Tools (Alternative)
-
-MCP equivalents (use CLI when possible):
-
-- `list_services`, `manage_service`, `capture_pane`, `create_pane`, `remove_pane`
-- `show_user_interaction` - Forms/Ink components (CLI: `ask`, `ink`)
-- `get_user_interaction` - Get async interaction result
-- `set_status` - Update window title
 
 ## Examples
 
@@ -61,4 +52,7 @@ mcp-ide pane build "npm run build"
 
 # Chain commands
 mcp-ide restart api && mcp-ide logs api
+
+# Ask user interactively
+mcp-ide ask "Deploy to production?" --header Confirm
 ```
