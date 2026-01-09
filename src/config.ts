@@ -149,6 +149,11 @@ export const SettingsSchema = z.object({
     .enum(["embedded", "standalone"])
     .optional()
     .describe("Tmux mode: embedded (panes in current session) or standalone (separate IDE session)"),
+  // Custom session name (supports env vars: $VAR or ${VAR})
+  sessionName: z
+    .string()
+    .optional()
+    .describe("Custom session name (supports $ENV_VAR). Overrides auto-detection from directory name."),
 });
 
 export type Settings = z.infer<typeof SettingsSchema>;
@@ -323,4 +328,15 @@ export function sortByDependencies(processes: ResolvedProcessConfig[]): Resolved
   }
 
   return sorted;
+}
+
+/**
+ * Expand environment variables in a string
+ * Supports $VAR and ${VAR} syntax
+ */
+export function expandEnvVars(str: string): string {
+  return str.replace(/\$\{([^}]+)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g, (_, braced, unbraced) => {
+    const varName = braced || unbraced;
+    return process.env[varName] || "";
+  });
 }

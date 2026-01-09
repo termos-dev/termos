@@ -87,9 +87,10 @@ services:
 
 ```yaml
 settings:
-  layout: grid                # grid | horizontal | vertical | main-left | main-top
-  autoAttachTerminal: true    # Auto-open terminal window
-  terminalApp: auto           # auto | ghostty | iterm | kitty | terminal
+  sessionName: myproject-$USER  # Custom session name (supports $ENV_VAR)
+  layout: grid                  # grid | horizontal | vertical | main-left | main-top
+  autoAttachTerminal: true      # Auto-open terminal window
+  terminalApp: auto             # auto | ghostty | iterm | kitty | terminal
 ```
 
 ## Interactive Forms

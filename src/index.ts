@@ -10,7 +10,7 @@ import {
 import { z } from "zod";
 import * as path from "path";
 import { existsSync, readFileSync } from "fs";
-import { loadConfig, configExists } from "./config.js";
+import { loadConfig, configExists, expandEnvVars } from "./config.js";
 import { ProcessManager } from "./process-manager.js";
 import { TmuxManager, EmbeddedTmuxManager, isTmuxAvailable, listIdeSessions, isInsideTmux } from "./tmux-manager.js";
 import { InteractionManager } from "./interaction-manager.js";
@@ -652,16 +652,19 @@ async function main() {
 
       if (hasConfig && !isStandalone) {
         const loaded = await loadConfig();
-        const projectName = path.basename(loaded.configDir);
+        const defaultName = path.basename(loaded.configDir);
+        const sessionName = loaded.config.settings?.sessionName
+          ? expandEnvVars(loaded.config.settings.sessionName)
+          : defaultName;
         const layout = loaded.config.layout ?? loaded.config.settings?.layout;
-        cliTmuxManager = new TmuxManager(projectName, {
+        cliTmuxManager = new TmuxManager(sessionName, {
           sessionPrefix: loaded.config.settings?.tmuxSessionPrefix,
           layout,
         });
 
         // Don't create new session for CLI, connect to existing
         if (!(await cliTmuxManager.sessionExists())) {
-          console.error(`No active session for ${projectName}. Start with: mcp-ide`);
+          console.error(`No active session for ${sessionName}. Start with: mcp-ide`);
           process.exit(1);
         }
 
@@ -735,10 +738,13 @@ async function main() {
     configDir = loaded.configDir;
 
     // Create tmux session with project name
-    const projectName = path.basename(configDir);
+    const defaultName = path.basename(configDir);
+    const sessionName = config.settings?.sessionName
+      ? expandEnvVars(config.settings.sessionName)
+      : defaultName;
     // Top-level layout takes precedence over settings.layout
     const layout = config.layout ?? config.settings?.layout;
-    tmuxManager = new TmuxManager(projectName, {
+    tmuxManager = new TmuxManager(sessionName, {
       sessionPrefix: config.settings?.tmuxSessionPrefix,
       layout,
     });
