@@ -17,7 +17,8 @@
     "ink-select-input": "^6.0.0",
     "ink-text-input": "^6.0.0",
     "react": "^18.3.1",
-    "tsx": "^4.19.0"
+    "tsx": "^4.19.0",
+    "zod": "^4.3.5"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",

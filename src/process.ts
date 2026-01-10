@@ -311,6 +311,15 @@ export class ManagedProcess {
   }
 
   /**
+   * Attach to an already-running tmux pane (for CLI tools querying status)
+   * Sets paneId and marks status as running
+   */
+  attachToExistingPane(paneId: string): void {
+    this.paneId = paneId;
+    this._status = "running";
+  }
+
+  /**
    * Start the process
    */
   async start(options: StartOptions = {}): Promise<void> {
@@ -360,8 +369,9 @@ export class ManagedProcess {
       fullCommand = `${resolvedCommand} ${resolvedArgs}`;
     }
 
-    // Create pane and run command in tmux
-    this.paneId = await this.tmuxManager.createPane(
+    // Create service window (tab) and run command in tmux
+    // Services run in separate windows for better organization
+    this.paneId = await this.tmuxManager.createServiceWindow(
       this.name,
       fullCommand,
       this.config.resolvedCwd,
@@ -369,7 +379,7 @@ export class ManagedProcess {
     );
 
     this.lastCapturedOutput = "";
-    console.error(`[mide] Started "${this.name}" in tmux pane ${this.paneId}`);
+    console.error(`[mide] Started "${this.name}" in tmux window (pane ${this.paneId})`);
 
     // Mark as running immediately (port detection happens async)
     this._status = "running";
@@ -961,12 +971,105 @@ export class ManagedProcess {
 
   /**
    * Restart the process
+   * Uses respawn-pane to preserve crash logs in the tmux window
    */
   async restart(options: StartOptions = {}): Promise<void> {
-    await this.stop();
+    // Increment restart count and timestamp
     this._restartCount++;
     this._lastRestartTime = new Date();
-    await this.start(options);
+
+    // Increment state sequence to invalidate pending async operations
+    this.stateSequence++;
+
+    // Stop health checker but don't kill the pane
+    this.stopHealthChecker();
+
+    // Reset runtime state (keeps paneId)
+    this._ready = false;
+    this._healthy = undefined;
+    this._url = undefined;
+    this._exports = {};
+    this.portVerified = false;
+    this.portVerificationInProgress = false;
+
+    if (this.config.port !== undefined) {
+      this._port = this.config.port;
+      this.portDetected = false;
+    } else {
+      this._port = undefined;
+      this.portDetected = false;
+    }
+
+    this.syncExportsMap();
+    this.syncPortMap();
+
+    // If pane was killed externally, fall back to full start
+    if (!this.paneId) {
+      console.error(`[mide] Pane for "${this.name}" was killed, creating new window`);
+      await this.start(options);
+      return;
+    }
+
+    if (!this.envContext) {
+      throw new Error(`Environment context not set for process "${this.name}"`);
+    }
+
+    this._status = "starting";
+    this._error = undefined;
+
+    // Build environment variables
+    const processEnv = this.buildEnvironment(options);
+
+    // Resolve command
+    const resolvedCommand = resolveCommand(this.config.command, this.envContext);
+
+    // Validate and resolve extra arguments if provided
+    let fullCommand = resolvedCommand;
+    if (options.args) {
+      const validatedArgs = validateCommandArgs(options.args);
+      const resolvedArgs = resolveCommand(validatedArgs, this.envContext);
+      fullCommand = `${resolvedCommand} ${resolvedArgs}`;
+    }
+
+    // Build restart banner
+    const time = new Date().toLocaleTimeString();
+    const exitInfo = this._exitCode !== undefined ? `exit code ${this._exitCode}` : "unknown exit";
+    // Show env var names (not values - they may be sensitive)
+    const envVarNames = Object.keys(processEnv).filter(k => !process.env[k] || process.env[k] !== processEnv[k]);
+    const envDisplay = envVarNames.length > 0 ? `env: ${envVarNames.join(", ")}` : "";
+    const cwdDisplay = `cwd: ${this.config.resolvedCwd}`;
+    const banner = [
+      "echo ''",
+      `echo '╔════════════════════════════════════════════════════════════╗'`,
+      `echo '║  🔄 RESTARTING (attempt ${this._restartCount}/${this.config.maxRestarts})'`,
+      `echo '║  Previous: ${exitInfo}'`,
+      `echo '║  Time: ${time}'`,
+      `echo '╚════════════════════════════════════════════════════════════╝'`,
+      `echo '$ ${fullCommand.replace(/'/g, "'\\''")}'`,
+      `echo '  ${cwdDisplay.replace(/'/g, "'\\''")}'`,
+      envDisplay ? `echo '  ${envDisplay.replace(/'/g, "'\\''")}'` : "true",
+      "echo ''",
+    ].join(" && ");
+
+    // Prepend banner to command
+    const commandWithBanner = `${banner} && ${fullCommand}`;
+
+    this.lastCapturedOutput = "";
+    console.error(`[mide] Restarting "${this.name}" in tmux window (pane ${this.paneId})`);
+
+    // Respawn in existing pane
+    await this.tmuxManager.respawnPane(
+      this.name,
+      commandWithBanner,
+      this.config.resolvedCwd,
+      processEnv
+    );
+
+    // Mark as running and start readiness checks
+    this._status = "running";
+    this.maybeStartHealthChecker();
+    this.maybeStartPortVerification();
+    this.maybeUpdateReadiness();
   }
 
   /**

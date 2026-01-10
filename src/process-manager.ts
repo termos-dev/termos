@@ -1,8 +1,15 @@
 import { EventEmitter } from "events";
-import { Config, ProcessConfig, ResolvedProcessConfig, resolveProcessConfigs, sortByDependencies, Settings, isGroupedLayout } from "./config.js";
+import * as path from "path";
+import { fileURLToPath } from "url";
+import { Config, ProcessConfig, ResolvedProcessConfig, resolveProcessConfigs, sortByDependencies, Settings, tabsEqual, getTabType, TabsConfig, normalizeTabToService } from "./config.js";
 import { ManagedProcess, ProcessState, StartOptions, ProcessSettings } from "./process.js";
 import { EnvContext } from "./env-resolver.js";
 import { TmuxManager } from "./tmux-manager.js";
+import { emitReadyEvent, emitErrorEvent } from "./events.js";
+
+// Get directory of this module (for finding bundled components)
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Dynamic terminal info
 export interface DynamicTerminal {
@@ -68,6 +75,11 @@ export class ProcessManager extends EventEmitter {
   // Dynamic terminals (created at runtime via MCP tools)
   private dynamicTerminals = new Map<string, DynamicTerminal>();
 
+  // Tab state
+  private welcomePaneActive = false;
+  private tabIndices = new Map<string, number>(); // tab name -> window index
+  private layoutTabs = new Set<string>(); // names of layout tabs (vs service tabs)
+
   constructor(configDir: string, options: ProcessManagerOptions) {
     super();
     this.configDir = configDir;
@@ -94,9 +106,44 @@ export class ProcessManager extends EventEmitter {
   }
 
   /**
-   * Initialize and start all processes from config
+   * Check if a tab is a layout tab
    */
-  async startAll(config: Config): Promise<void> {
+  isLayoutTab(name: string): boolean {
+    return this.layoutTabs.has(name);
+  }
+
+  /**
+   * List all tabs with their info (both service and layout tabs)
+   */
+  listTabs(): Array<{
+    name: string;
+    type: "service" | "layout";
+    windowIndex: number;
+    status?: string;
+    port?: number;
+    healthy?: boolean;
+  }> {
+    return Array.from(this.tabIndices.entries()).map(([name, windowIndex]) => {
+      const isLayout = this.layoutTabs.has(name);
+      const process = this.processes.get(name);
+      const state = process?.getState();
+
+      return {
+        name,
+        type: isLayout ? "layout" as const : "service" as const,
+        windowIndex,
+        status: state?.status,
+        port: state?.port,
+        healthy: state?.healthy,
+      };
+    });
+  }
+
+  /**
+   * Load process definitions from config without starting them
+   * Useful for CLI tools that need to query status of already-running processes
+   */
+  async loadProcesses(config: Config): Promise<void> {
     this.currentConfig = config;
 
     // Resolve and sort processes
@@ -124,23 +171,215 @@ export class ProcessManager extends EventEmitter {
     this.processes.clear();
     this.processConfigs.clear();
 
-    // Register all processes
-    for (const processConfig of sorted) {
-      this.registerProcess(processConfig, envContext, portMap);
-    }
+    // Discover existing windows in the tmux session
+    const existingWindows = await this.tmuxManager.discoverWindows();
 
-    // Start auto-start processes in dependency order
-    for (const processConfig of sorted) {
-      const blockReason = this.getAutoStartBlockReason(processConfig);
-      if (blockReason) {
-        console.error(`[mide] Not auto-starting "${processConfig.name}" (${blockReason})`);
-        continue;
+    // Track which tabs are layout tabs (array config = layout, string/object = service)
+    this.layoutTabs.clear();
+    const configTabNames = new Set<string>();
+    if (config.tabs) {
+      for (const [name, tabConfig] of Object.entries(config.tabs)) {
+        configTabNames.add(name);
+        if (Array.isArray(tabConfig)) {
+          this.layoutTabs.add(name);
+        }
       }
-      await this.startManagedProcess(processConfig);
     }
 
-    // Start tmux polling for status updates
+    // Discover window indices for tabIndices map (only for tabs in config)
+    const windowIndices = await this.tmuxManager.discoverWindowIndices();
+    this.tabIndices.clear();
+    for (const [name, index] of windowIndices) {
+      // Only include tabs that are in the config (skip welcome window, etc)
+      if (configTabNames.has(name)) {
+        this.tabIndices.set(name, index);
+      }
+    }
+
+    // Discover existing panes in Canvas (window 0) for dynamic terminals
+    const existingPanes = await this.tmuxManager.discoverCanvasPanes();
+    for (const [name, paneId] of existingPanes) {
+      if (!this.dynamicTerminals.has(name)) {
+        this.dynamicTerminals.set(name, {
+          name,
+          command: "(recovered)",
+          group: "dynamic",
+          paneId,
+          createdAt: new Date(),
+        });
+      }
+    }
+
+    // Register all processes (but don't start them)
+    for (const processConfig of sorted) {
+      const process = this.registerProcess(processConfig, envContext, portMap);
+
+      // If the process has a running window in tmux, attach to it
+      const paneId = existingWindows.get(processConfig.name);
+      if (paneId) {
+        process.attachToExistingPane(paneId);
+      }
+    }
+
+    // Start tmux polling to update status from running windows
     this.startTmuxPolling();
+  }
+
+  /**
+   * Initialize and start all tabs from config
+   */
+  async startAll(config: Config): Promise<void> {
+    // Load service processes first (for ManagedProcess tracking)
+    await this.loadProcesses(config);
+
+    // Start tabs (welcome + all configured tabs)
+    await this.startTabs(config);
+  }
+
+  /**
+   * Start all tabs from config
+   * Window 0 always shows welcome, tabs start at window 1+
+   */
+  async startTabs(config: Config): Promise<void> {
+    // Always show welcome in window 0
+    await this.showWelcomeComponent();
+    this.welcomePaneActive = true;
+
+    // Create all tabs from config
+    if (config.tabs && Object.keys(config.tabs).length > 0) {
+      console.error(`[mide] Creating ${Object.keys(config.tabs).length} tab(s)`);
+
+      // Track which tabs are layouts vs services
+      this.layoutTabs.clear();
+      for (const [name, tabConfig] of Object.entries(config.tabs)) {
+        if (getTabType(tabConfig) === "layout") {
+          this.layoutTabs.add(name);
+        }
+      }
+
+      // Create tabs using tmux manager
+      this.tabIndices = await this.tmuxManager.createAllTabs(
+        config.tabs,
+        this.configDir,
+        // Callback for service tabs - start their managed process
+        (name: string, _paneId: string, _windowIndex: number) => {
+          const processConfig = this.processConfigs.get(name);
+          if (processConfig) {
+            const blockReason = this.getAutoStartBlockReason(processConfig);
+            if (blockReason) {
+              console.error(`[mide] Not auto-starting "${name}" (${blockReason})`);
+              return;
+            }
+            this.startManagedProcess(processConfig);
+          }
+        }
+      );
+
+      // Update welcome with tab info
+      await this.showWelcomeComponent();
+    }
+  }
+
+  /**
+   * Show the welcome Ink component in window 0
+   */
+  private async showWelcomeComponent(): Promise<void> {
+    // Build tab info for welcome display
+    const tabs = Array.from(this.tabIndices.entries()).map(([name, windowIndex]) => {
+      const isLayout = this.layoutTabs.has(name);
+      const process = this.processes.get(name);
+      const state = process?.getState();
+
+      return {
+        name,
+        windowIndex,
+        type: isLayout ? "layout" : "service",
+        status: state?.status,
+        restartCount: state?.restartCount,
+        port: state?.port,
+        healthy: state?.healthy,
+      };
+    });
+
+    // Find interactive files in .mide/interactive/ (project) and ~/.mide/interactions/ (global)
+    let projectInteractive: string[] = [];
+    let globalInteractive: string[] = [];
+
+    const projectInteractiveDir = path.join(this.configDir, ".mide/interactive");
+    const globalInteractiveDir = path.join(process.env.HOME || "~", ".mide/interactions");
+
+    try {
+      const fs = await import("fs");
+      if (fs.existsSync(projectInteractiveDir)) {
+        projectInteractive = fs.readdirSync(projectInteractiveDir)
+          .filter(f => f.endsWith(".tsx"))
+          .sort();
+      }
+      if (fs.existsSync(globalInteractiveDir)) {
+        globalInteractive = fs.readdirSync(globalInteractiveDir)
+          .filter(f => f.endsWith(".tsx"))
+          .sort();
+      }
+    } catch {
+      // Ignore errors
+    }
+
+    const args = {
+      sessionName: this.tmuxManager.sessionName,
+      tabs,
+      projectInteractive,
+      globalInteractive,
+    };
+
+    // Find the ink-runner components directory
+    // Use module's location to find bundled components
+    const moduleRoot = path.resolve(__dirname, "..");
+    const possiblePaths = [
+      // Bundled in dist (production and dev after build)
+      path.join(moduleRoot, "dist/ink-runner/components/welcome.tsx"),
+      // Development (packages source)
+      path.join(moduleRoot, "packages/ink-runner/components/welcome.tsx"),
+      // Installed via npm
+      path.join(process.cwd(), "node_modules/mcp-ide/dist/ink-runner/components/welcome.tsx"),
+    ];
+
+    let welcomePath: string | null = null;
+    for (const p of possiblePaths) {
+      try {
+        await import("fs").then(fs => fs.promises.access(p));
+        welcomePath = p;
+        break;
+      } catch {
+        // Continue to next path
+      }
+    }
+
+    if (!welcomePath) {
+      // Fallback: show a simple message that stays alive
+      console.error("[mide] Welcome component not found, using fallback");
+      const fallbackCmd = `echo "Welcome to mide - Session: ${this.tmuxManager.sessionName}" && echo "" && echo "Tabs: Use Ctrl-b <number> to switch tabs" && echo "" && tail -f /dev/null`;
+      const initialPaneId = await this.tmuxManager.getWindow0InitialPaneId();
+      if (initialPaneId) {
+        this.tmuxManager.registerPane("__welcome__", initialPaneId);
+        await this.tmuxManager.respawnPane("__welcome__", fallbackCmd, this.configDir);
+      }
+      return;
+    }
+
+    // Find ink-runner path
+    const inkRunnerPath = path.dirname(path.dirname(welcomePath));
+    const inkRunner = path.join(inkRunnerPath, "dist/index.js");
+
+    // Build the command to run the welcome component
+    const welcomeCommand = `node "${inkRunner}" --file "${welcomePath}" --args '${JSON.stringify(args).replace(/'/g, "'\\''")}'`;
+
+    // Respawn window 0's initial pane with welcome component
+    const initialPaneId = await this.tmuxManager.getWindow0InitialPaneId();
+    if (initialPaneId) {
+      this.tmuxManager.registerPane("__welcome__", initialPaneId);
+      await this.tmuxManager.respawnPane("__welcome__", welcomeCommand, this.configDir);
+      console.error("[mide] Welcome component started");
+    }
   }
 
   /**
@@ -163,6 +402,8 @@ export class ProcessManager extends EventEmitter {
           this.events.onProcessReady?.(p.name);
           // Emit event for dependency waiting
           this.emit("processReady", p.name);
+          // Write to events file
+          emitReadyEvent(this.tmuxManager.sessionName, p.name, p.port, p.url);
           // Adjust poll rate once processes are ready
           this.adjustTmuxPollRate();
         },
@@ -170,6 +411,8 @@ export class ProcessManager extends EventEmitter {
           this.events.onProcessCrash?.(p.name, exitCode);
           // Emit event for dependency waiting (in case something is waiting)
           this.emit("processFailed", p.name, exitCode);
+          // Write to events file
+          emitErrorEvent(this.tmuxManager.sessionName, p.name, "Process crashed", exitCode ?? undefined);
           this.handleCrash(p.name, processConfig);
         },
         onLog: (p, line, stream) => {
@@ -263,9 +506,16 @@ export class ProcessManager extends EventEmitter {
   /**
    * Reload config and apply changes (stop removed, start added, restart changed)
    */
-  async reload(newConfig: Config): Promise<{ added: string[]; removed: string[]; changed: string[] }> {
+  async reload(newConfig: Config): Promise<{ added: string[]; removed: string[]; changed: string[]; tabsReloaded: boolean }> {
     const oldProcessNames = new Set(this.processConfigs.keys());
-    const newProcessNames = new Set(Object.keys(newConfig.processes));
+
+    // Get service tabs from new config (filter out layout tabs)
+    const newServiceTabs = newConfig.tabs
+      ? Object.entries(newConfig.tabs)
+          .filter(([, config]) => getTabType(config) === "service")
+          .map(([name]) => name)
+      : [];
+    const newProcessNames = new Set(newServiceTabs);
 
     const added: string[] = [];
     const removed: string[] = [];
@@ -279,7 +529,11 @@ export class ProcessManager extends EventEmitter {
     }
 
     // Find added and changed processes
-    for (const [name, newProcessConfig] of Object.entries(newConfig.processes)) {
+    for (const name of newServiceTabs) {
+      const tabConfig = newConfig.tabs![name];
+      const newProcessConfig = normalizeTabToService(name, tabConfig);
+      if (!newProcessConfig) continue;
+
       if (!oldProcessNames.has(name)) {
         added.push(name);
       } else {
@@ -322,6 +576,9 @@ export class ProcessManager extends EventEmitter {
         this.restartTimers.delete(name);
       }
     }
+
+    // Save old tabs before updating config (for hot-reload comparison)
+    const oldTabs = this.currentConfig?.tabs;
 
     // Update config
     this.currentConfig = newConfig;
@@ -387,9 +644,53 @@ export class ProcessManager extends EventEmitter {
       }
     }
 
-    // Update status after reload
+    // Check if tabs changed - if so, kill and recreate all tab windows (preserve Tab 0)
+    const newTabs = newConfig.tabs;
+    let tabsReloaded = false;
 
-    return { added, removed, changed };
+    if (!tabsEqual(oldTabs, newTabs)) {
+      console.error("[mide] Tabs config changed - recreating all tabs");
+
+      // Kill all tab windows (windows 1+)
+      await this.tmuxManager.killAllTabWindows();
+
+      // Clear tab tracking
+      this.tabIndices.clear();
+      this.layoutTabs.clear();
+
+      // Track which tabs are layouts
+      if (newTabs) {
+        for (const [name, tabConfig] of Object.entries(newTabs)) {
+          if (getTabType(tabConfig) === "layout") {
+            this.layoutTabs.add(name);
+          }
+        }
+
+        // Recreate all tabs
+        this.tabIndices = await this.tmuxManager.createAllTabs(
+          newTabs,
+          this.configDir,
+          (name: string, _paneId: string, _windowIndex: number) => {
+            const processConfig = this.processConfigs.get(name);
+            if (processConfig) {
+              const blockReason = this.getAutoStartBlockReason(processConfig);
+              if (blockReason) {
+                console.error(`[mide] Not auto-starting "${name}" (${blockReason})`);
+                return;
+              }
+              this.startManagedProcess(processConfig);
+            }
+          }
+        );
+      }
+
+      tabsReloaded = true;
+    }
+
+    // Update welcome component to reflect any changes
+    await this.showWelcomeComponent();
+
+    return { added, removed, changed, tabsReloaded };
   }
 
   /**
@@ -488,6 +789,53 @@ export class ProcessManager extends EventEmitter {
       this.restartTimers.set(name, timer);
     } else if (shouldRestart) {
       console.error(`[mide] Process "${name}" exceeded max restarts (${config.maxRestarts}), giving up`);
+      // Show failure banner in the pane
+      this.showFailureBanner(name, exitCode, config.maxRestarts);
+    }
+  }
+
+  /**
+   * Show a failure banner in a crashed process's tmux pane
+   */
+  private async showFailureBanner(name: string, exitCode: number | undefined, maxRestarts: number): Promise<void> {
+    const time = new Date().toLocaleTimeString();
+    const exitInfo = exitCode !== undefined ? `exit code ${exitCode}` : "unknown exit";
+
+    // Get the command and config from process
+    const processConfig = this.processConfigs.get(name);
+    const cmd = processConfig?.command || "unknown";
+    const cwd = processConfig?.resolvedCwd || this.configDir;
+
+    // Get env var names (not values - they may be sensitive)
+    const envVarNames: string[] = [];
+    if (processConfig?.env) {
+      envVarNames.push(...Object.keys(processConfig.env));
+    }
+    if (processConfig?.envFile) {
+      envVarNames.push(`(from ${processConfig.envFile})`);
+    }
+    const envDisplay = envVarNames.length > 0 ? `env: ${envVarNames.join(", ")}` : "";
+
+    // Respawn the pane with just the banner message (keeps pane alive to show logs)
+    const bannerCommand = [
+      "echo ''",
+      `echo '╔════════════════════════════════════════════════════════════╗'`,
+      `echo '║  ❌ PROCESS FAILED - Max restarts (${maxRestarts}) exceeded'`,
+      `echo '║  Last: ${exitInfo}'`,
+      `echo '║  Time: ${time}'`,
+      `echo '╚════════════════════════════════════════════════════════════╝'`,
+      `echo '$ ${cmd.replace(/'/g, "'\\''")}'`,
+      `echo '  cwd: ${cwd.replace(/'/g, "'\\''")}'`,
+      envDisplay ? `echo '  ${envDisplay.replace(/'/g, "'\\''")}'` : "true",
+      "echo ''",
+      "echo 'Scroll up to view logs. Press Enter to close.'",
+      "read",  // Wait for user input before closing
+    ].join(" && ");
+
+    try {
+      await this.tmuxManager.respawnPane(name, bannerCommand, this.configDir);
+    } catch {
+      // Ignore errors - pane might be in an unexpected state
     }
   }
 
@@ -681,16 +1029,12 @@ export class ProcessManager extends EventEmitter {
    * Get available group names for dynamic terminals
    */
   getAvailableGroups(): string[] {
-    const groups = this.tmuxManager.getGroupNames();
-    // Always include "dynamic" as a fallback group
-    if (!groups.includes("dynamic")) {
-      groups.push("dynamic");
-    }
-    return groups;
+    return ["dynamic"];
   }
 
   /**
    * Create a dynamic terminal in a specific group
+   * If welcome pane is active and is the only pane, replaces it
    */
   async createDynamicTerminal(name: string, command: string, group?: string): Promise<DynamicTerminal> {
     // Check if name is already used by a configured process
@@ -703,18 +1047,36 @@ export class ProcessManager extends EventEmitter {
       throw new Error(`Dynamic terminal "${name}" already exists`);
     }
 
-    // Determine target group
-    const availableGroups = this.tmuxManager.getGroupNames();
-    let targetGroup = group ?? "dynamic";
+    // Check if we should replace the welcome pane
+    if (this.welcomePaneActive && await this.tmuxManager.isOnlyWelcomePane()) {
+      // Replace welcome pane with the new terminal
+      const initialPaneId = await this.tmuxManager.getWindow0InitialPaneId();
+      if (initialPaneId) {
+        // Register the pane and respawn it with the new command
+        this.tmuxManager.registerPane(name, initialPaneId);
+        await this.tmuxManager.respawnPane(name, command, this.configDir);
 
-    // If a specific group was requested, validate it exists
-    if (group && availableGroups.length > 0 && !availableGroups.includes(group)) {
-      throw new Error(
-        `Group "${group}" not found. Available groups: ${availableGroups.join(", ")}`
-      );
+        // Clear welcome state
+        this.welcomePaneActive = false;
+        this.tmuxManager.unregisterPane("__welcome__");
+
+        const terminal: DynamicTerminal = {
+          name,
+          command,
+          group: "dashboard",
+          paneId: initialPaneId,
+          createdAt: new Date(),
+        };
+
+        this.dynamicTerminals.set(name, terminal);
+        console.error(`[mide] Replaced welcome pane with terminal "${name}"`);
+
+        return terminal;
+      }
     }
 
-    // Create the pane in the specified group
+    // Create the pane in window 0
+    const targetGroup = group ?? "dynamic";
     const paneId = await this.tmuxManager.createDynamicPane(
       name,
       command,

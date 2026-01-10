@@ -8,7 +8,6 @@
   "repository": "https://github.com/buremba/claude-ide",
   "license": "MIT",
   "keywords": ["process", "ide", "dev-server", "terminal", "interactive"],
-  "mcpServers": "./.claude-plugin/mcp.json",
   "commands": "./.claude-plugin/commands/",
   "skills": "./.claude-plugin/skills/",
   "hooks": "./.claude-plugin/hooks/hooks.json"

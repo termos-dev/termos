@@ -1,15 +1,16 @@
 ---
-allowed-tools: mcp__ide__list_processes, mcp__ide__get_status
+allowed-tools: Bash
 ---
 
-List all processes and their current status using the IDE MCP tools.
+List all services and their status.
 
-Show a formatted table with columns: Name, Port, Status, Health.
+Run: `"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/scripts/mide.sh" ls`
 
-Use these status indicators:
-- Running/Ready: green checkmark
-- Crashed: red X
-- Starting: yellow spinner
-- Pending: gray circle
+Output includes:
+- Service name and status
+- Port (if configured)
+- URL (if detected)
+- Log file path (use `tail -f` to view logs)
+- Events file path (for real-time events)
 
-If a process has a health check configured, show its health status.
+If no session is running, suggest running `"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/scripts/mide.sh" connect` first.

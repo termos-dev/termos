@@ -17,6 +17,8 @@
     "bundle:ink-runner": "node scripts/bundle-ink-runner.mjs",
     "dev": "tsc --watch",
     "start": "node dist/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "prepublishOnly": "npm run build",
     "inspector": "npx @anthropic-ai/mcp-inspector node dist/index.js"
   },
@@ -45,14 +47,16 @@
   ],
   "license": "MIT",
   "dependencies": {
+    "@mcp-ide/shared": "file:packages/shared",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "yaml": "^2.3.4",
     "zod": "^3.22.4"
   },
   "devDependencies": {
-    "@types/node": "^20.10.0",
+    "@types/node": "^20.19.27",
     "esbuild": "^0.27.2",
-    "typescript": "^5.3.0"
+    "typescript": "^5.3.0",
+    "vitest": "^4.0.16"
   },
   "engines": {
     "node": ">=18"

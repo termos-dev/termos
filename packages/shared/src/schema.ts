@@ -1,8 +1,7 @@
-import { writeFileSync } from "fs";
 import { z } from "zod";
 
 /**
- * Zod schemas for validation - source of truth
+ * Zod schemas for form validation - source of truth
  */
 
 export const FormOptionSchema = z.object({
@@ -88,78 +87,5 @@ Schema Format:
 Input Methods:
   --schema '<json>'     Pass JSON directly (escape quotes carefully)
   cat file.json | ...   Pipe JSON via stdin (recommended for complex schemas)
-
-Example with stdin:
-  echo '{"questions":[{"question":"Name?","header":"name"}]}' | ink-runner
 `.trim();
-}
-
-export type FormAction = "accept" | "decline" | "cancel";
-
-export interface FormResult {
-  action: FormAction;
-  answers?: Record<string, string | string[]>;
-}
-
-/**
- * Output protocol: Print this to stdout when form completes
- * The IDE captures this from the tmux pane
- */
-export const RESULT_PREFIX = "__MCP_RESULT__:";
-
-/**
- * Progress protocol: Print this to stdout for intermediate updates
- * Allows Claude to track form progress via capture_pane
- */
-export const PROGRESS_PREFIX = "__MCP_PROGRESS__:";
-
-export function emitProgress(data: Record<string, unknown>): void {
-  console.log(`${PROGRESS_PREFIX}${JSON.stringify(data)}`);
-}
-
-export function emitResult(result: FormResult): void {
-  console.log(`${RESULT_PREFIX}${JSON.stringify(result)}`);
-}
-
-/**
- * File-based result communication (more reliable than stdout)
- * Result files are stored in /tmp with pattern: mcp-interaction-{id}.result
- */
-export const RESULT_FILE_DIR = "/tmp";
-
-export function getResultFilePath(interactionId: string): string {
-  return `${RESULT_FILE_DIR}/mcp-interaction-${interactionId}.result`;
-}
-
-/**
- * Write result to file synchronously - guarantees write completes before process exit
- */
-export function writeResultFile(interactionId: string, result: FormResult): void {
-  const filePath = getResultFilePath(interactionId);
-  writeFileSync(filePath, JSON.stringify(result), "utf-8");
-}
-
-/**
- * Global interaction ID - set from command line args
- */
-let _interactionId: string | undefined;
-
-export function setInteractionId(id: string): void {
-  _interactionId = id;
-}
-
-export function getInteractionId(): string | undefined {
-  return _interactionId;
-}
-
-/**
- * Emit result via both file (reliable) and stdout (fallback/debugging)
- */
-export function emitResultWithFile(result: FormResult): void {
-  // Write to file first (synchronous, guaranteed)
-  if (_interactionId) {
-    writeResultFile(_interactionId, result);
-  }
-  // Also emit to stdout for backward compatibility and debugging
-  emitResult(result);
 }

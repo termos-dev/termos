@@ -12,10 +12,12 @@ import * as path from "path";
 import { existsSync, readFileSync } from "fs";
 import { loadConfig, configExists, expandEnvVars } from "./config.js";
 import { ProcessManager } from "./process-manager.js";
-import { TmuxManager, EmbeddedTmuxManager, isTmuxAvailable, listIdeSessions, isInsideTmux } from "./tmux-manager.js";
-import { InteractionManager } from "./interaction-manager.js";
+import { TmuxManager, EmbeddedTmuxManager, isTmuxAvailable, listIdeSessions, isInsideTmux, getServiceLogPath, getEventsFilePath, getSessionLogDir, cleanupStaleSession } from "./tmux-manager.js";
+import { InteractionManager, type InteractionResult } from "./interaction-manager.js";
+import { emitReloadEvent, readEvents } from "./events.js";
+import { FileWatcher } from "./file-watcher.js";
 
-type Command = "server" | "sessions" | "attach" | "help" | "cli-tool" | "up" | "down";
+type Command = "server" | "sessions" | "connect" | "help" | "cli-tool" | "down" | "gc" | "up";
 
 // CLI command definitions - maps CLI aliases to tool names and arg parsers
 const CLI_COMMANDS: Record<string, {
@@ -24,7 +26,7 @@ const CLI_COMMANDS: Record<string, {
   parseArgs: (args: string[]) => Record<string, unknown> | null;
 }> = {
   ls: {
-    tool: "list_services",
+    tool: "list_tabs",
     usage: "mcp-ide ls",
     parseArgs: () => ({}),
   },
@@ -43,16 +45,6 @@ const CLI_COMMANDS: Record<string, {
     usage: "mcp-ide restart <service>",
     parseArgs: (args) => args[1] ? { name: args[1], op: "restart" } : null,
   },
-  logs: {
-    tool: "capture_pane",
-    usage: "mcp-ide logs <name> [--lines N]",
-    parseArgs: (args) => {
-      if (!args[1]) return null;
-      const linesIdx = args.indexOf("--lines");
-      const lines = linesIdx !== -1 && args[linesIdx + 1] ? parseInt(args[linesIdx + 1], 10) : 100;
-      return { name: args[1], lines };
-    },
-  },
   pane: {
     tool: "create_pane",
     usage: "mcp-ide pane <name> <command>",
@@ -63,47 +55,74 @@ const CLI_COMMANDS: Record<string, {
     usage: "mcp-ide rm <name>",
     parseArgs: (args) => args[1] ? { name: args[1] } : null,
   },
-  status: {
-    tool: "set_status",
-    usage: "mcp-ide status <status> [message]",
-    parseArgs: (args) => ({ status: args[1] || "running", message: args[2] }),
+  reload: {
+    tool: "reload_config",
+    usage: "mcp-ide reload",
+    parseArgs: () => ({}),
   },
-  ask: {
-    tool: "show_user_interaction",
-    usage: "mcp-ide ask <question> [--header Header]",
+  // Unified run command: ink files OR shell commands
+  // Usage:
+  //   mcp-ide run form.tsx              # Ink component (blocks)
+  //   mcp-ide run form.tsx --arg key=val  # Ink with args
+  //   mcp-ide run -- npm test           # Shell command (non-blocking)
+  //   mcp-ide run --wait -- npm test    # Shell command (blocking)
+  run: {
+    tool: "run_interaction",
+    usage: "mcp-ide run [--wait] [file.tsx [--arg k=v]] | mcp-ide run [--wait] -- <command>",
     parseArgs: (args) => {
-      if (!args[1]) return null;
-      const headerIdx = args.indexOf("--header");
-      const header = headerIdx !== -1 && args[headerIdx + 1] ? args[headerIdx + 1] : "Answer";
-      const question = args.slice(1).filter((_, i) => {
-        const argI = i + 1;
-        return argI !== headerIdx && argI !== headerIdx + 1;
-      }).join(" ");
-      return {
-        schema: { questions: [{ question, header, inputType: "text" }] },
-        timeout_ms: 300000, // 5 min timeout for CLI
-      };
-    },
-  },
-  ink: {
-    tool: "show_user_interaction",
-    usage: "mcp-ide ink <file.tsx> [--arg value]",
-    parseArgs: (args) => {
-      if (!args[1]) return null;
-      // Parse additional args as key-value pairs
+      if (args.length < 2) return null;
+
+      // Check for --wait flag
+      let waitFlag = false;
+      let restArgs = args.slice(1);
+      if (restArgs[0] === "--wait") {
+        waitFlag = true;
+        restArgs = restArgs.slice(1);
+      }
+
+      // Check for -- separator (shell command mode)
+      const separatorIdx = restArgs.indexOf("--");
+      if (separatorIdx !== -1) {
+        // Shell command mode: everything after -- is the command
+        const command = restArgs.slice(separatorIdx + 1).join(" ");
+        if (!command) return null;
+        // timeout_ms: 0 = non-blocking, 300000 = blocking (5 min)
+        return { command, timeout_ms: waitFlag ? 300000 : 0 };
+      }
+
+      // Ink file mode: first arg is the file
+      if (!restArgs[0]) return null;
+      const inkFile = restArgs[0];
+
+      // Must be a .tsx or .jsx file
+      if (!inkFile.endsWith(".tsx") && !inkFile.endsWith(".jsx")) {
+        console.error("Error: File must be .tsx or .jsx, or use -- for shell commands");
+        return null;
+      }
+
+      // Parse --arg key=value pairs
       const inkArgs: Record<string, string> = {};
-      for (let i = 2; i < args.length; i += 2) {
-        if (args[i].startsWith("--") && args[i + 1]) {
-          inkArgs[args[i].slice(2)] = args[i + 1];
+      for (let i = 1; i < restArgs.length; i++) {
+        if (restArgs[i] === "--arg" && restArgs[i + 1]) {
+          const [key, ...valueParts] = restArgs[i + 1].split("=");
+          if (key) {
+            inkArgs[key] = valueParts.join("=");
+          }
+          i++; // Skip the value
         }
       }
-      return { ink_file: args[1], ink_args: inkArgs, timeout_ms: 300000 };
+
+      // Ink always blocks
+      return { ink_file: inkFile, ink_args: Object.keys(inkArgs).length > 0 ? inkArgs : undefined, timeout_ms: 300000 };
     },
   },
-  plan: {
-    tool: "show_user_interaction",
-    usage: "mcp-ide plan <file.md>",
-    parseArgs: (args) => args[1] ? { ink_file: "__builtin__/plan-viewer.tsx", ink_args: { file: args[1] }, timeout_ms: 600000 } : null,
+  send: {
+    tool: "send_keys",
+    usage: "mcp-ide send <pane> <keys>",
+    parseArgs: (args) => {
+      if (!args[1] || !args[2]) return null;
+      return { name: args[1], keys: args.slice(2).join(" ") };
+    },
   },
 };
 
@@ -114,6 +133,9 @@ interface ParsedArgs {
   paneName?: string;
   toolName?: string;
   toolArgs?: Record<string, unknown>;
+  // up command options
+  detach?: boolean;      // -d: return immediately after starting
+  jsonOutput?: boolean;  // --json: output as JSONL for agents (no TTY)
 }
 
 /**
@@ -129,10 +151,8 @@ async function loadConfigAndTmux(configPath?: string): Promise<{
   const sessionName = loaded.config.settings?.sessionName
     ? expandEnvVars(loaded.config.settings.sessionName)
     : defaultName;
-  const layout = loaded.config.layout ?? loaded.config.settings?.layout;
   const tmux = new TmuxManager(sessionName, {
     sessionPrefix: loaded.config.settings?.tmuxSessionPrefix,
-    layout,
   });
   return { config: loaded, tmux, sessionName };
 }
@@ -158,9 +178,22 @@ function parseArgs(): ParsedArgs {
   // Built-in commands
   if (firstArg === "server") return { command: "server", config };
   if (firstArg === "sessions") return { command: "sessions" };
-  if (firstArg === "attach") return { command: "attach", sessionName: args[1], paneName: args[2] };
-  if (firstArg === "up") return { command: "up" };
+  // up: start services, wait for ready, return status (with -d for detached, --json for agent mode)
+  if (firstArg === "up") {
+    let detach = false;
+    let jsonOutput = false;
+    for (let i = 1; i < args.length; i++) {
+      if (args[i] === "-d" || args[i] === "--detach") detach = true;
+      else if (args[i] === "--json") jsonOutput = true;
+    }
+    return { command: "up", detach, jsonOutput };
+  }
+  // connect/attach: create session if needed, attach to tmux (TTY mode)
+  if (firstArg === "connect" || firstArg === "attach") {
+    return { command: "connect", sessionName: args[1], paneName: args[2] };
+  }
   if (firstArg === "down") return { command: "down" };
+  if (firstArg === "gc") return { command: "gc" };
   if (firstArg === "help" || firstArg === "--help" || firstArg === "-h") return { command: "help" };
 
   // CLI tool commands
@@ -198,11 +231,17 @@ function showHelp(): void {
 mcp-ide - Interactive Development Environment for Claude Code
 
 Usage:
-  mcp-ide up                  Start session and services (creates tmux)
-  mcp-ide down                Stop services and kill session
-  mcp-ide attach [session]    Attach to tmux session
+  mcp-ide up [-d] [--json]    Start services, wait for ready, return status
+  mcp-ide connect [session]   Attach to session (create if needed)
+  mcp-ide down                Stop session and tabs
   mcp-ide sessions            List active sessions
-  mcp-ide [options]           Start MCP server (default)
+
+Up Options:
+  -d, --detach            Return immediately after starting (don't wait)
+  --json                  Output as JSON (for agents/scripts)
+
+Aliases:
+  mcp-ide attach              Same as connect
 
 CLI Commands:
 ${cliCmdsHelp}
@@ -212,16 +251,24 @@ Options:
   -c, --config <path>     Path to mide.yaml config file
 
 Configuration:
-  Create an mide.yaml file in your project root to define services.
+  Create an mide.yaml file in your project root to define tabs.
 
 Example mide.yaml:
-  services:
-    api:
+  tabs:
+    api: npm run dev            # String = service tab
+    frontend:                   # Object = service with options
       command: npm run dev
       port: 3000
-    frontend:
-      command: npm run dev
-      cwd: ./frontend
+    dashboard:                  # Array = layout tab with panes
+      - [htop, "watch date"]
+
+Agent Usage:
+  # Start and stream events (for AI agents)
+  mcp-ide up --json
+
+  # Start detached and poll events file
+  mcp-ide up -d --json
+  tail -f /tmp/mide-<session>/events.jsonl
 `);
 }
 
@@ -243,69 +290,15 @@ async function commandSessions(): Promise<void> {
 
   for (const session of sessions) {
     const age = formatAge(session.created);
-    console.log(`  ${session.name.padEnd(30)} ${session.windows} window(s)   ${age}`);
+    const status = session.isStale ? "[STALE]" : "[ACTIVE]";
+    const clientInfo = session.clients > 0 ? `${session.clients} client(s)` : "no clients";
+    const pidInfo = session.ownerPid ? `PID ${session.ownerPid}` : "no owner";
+    console.log(`  ${session.name.padEnd(25)} ${session.windows} win  ${age.padEnd(4)}  ${status.padEnd(8)}  ${clientInfo.padEnd(12)}  ${pidInfo}`);
   }
 
   console.log("");
-  console.log("Use: mcp-ide attach <name>");
-}
-
-/**
- * Attach to a tmux session, optionally selecting a specific pane
- */
-async function commandAttach(sessionName?: string, paneName?: string): Promise<void> {
-  const sessions = await listIdeSessions();
-
-  if (sessions.length === 0) {
-    console.error("No active IDE sessions found.");
-    process.exit(1);
-  }
-
-  let targetSession: string;
-
-  if (sessionName) {
-    // Find exact or prefix match
-    const match = sessions.find(
-      (s) => s.name === sessionName || s.name.startsWith(sessionName)
-    );
-    if (!match) {
-      console.error(`Session "${sessionName}" not found.`);
-      console.error("\nAvailable sessions:");
-      sessions.forEach((s) => console.error(`  ${s.name}`));
-      process.exit(1);
-    }
-    targetSession = match.name;
-  } else {
-    // Auto-detect: try to find session for current directory
-    const projectName = path.basename(process.cwd());
-    const expectedName = `mide-${projectName.toLowerCase().replace(/[^a-z0-9_-]/g, "-")}`;
-
-    const match = sessions.find((s) => s.name === expectedName || s.name.startsWith(expectedName));
-
-    if (match) {
-      targetSession = match.name;
-    } else if (sessions.length === 1) {
-      targetSession = sessions[0].name;
-    } else {
-      console.error("Multiple sessions available. Please specify which one:");
-      sessions.forEach((s) => console.error(`  mcp-ide attach ${s.name}`));
-      process.exit(1);
-    }
-  }
-
-  // Create a temporary TmuxManager just to attach
-  const tmux = new TmuxManager(targetSession.replace(/^mide-/, ""));
-  (tmux as { sessionName: string }).sessionName = targetSession;
-
-  // If pane name specified, select it before attaching
-  if (paneName) {
-    console.log(`Attaching to ${targetSession} (pane: ${paneName})...`);
-    await tmux.selectPane(paneName);
-  } else {
-    console.log(`Attaching to ${targetSession}...`);
-  }
-
-  tmux.attach();
+  console.log("Use: mcp-ide connect <name>");
+  console.log("Use: mcp-ide gc          (clean up stale sessions)");
 }
 
 function formatAge(date: Date): string {
@@ -329,24 +322,33 @@ async function executeCLITool(
   tmuxManager?: TmuxManager
 ): Promise<string> {
   switch (toolName) {
-    case "list_services": {
-      if (!processManager) return "No services configured";
-      const services = processManager.listProcesses();
-      if (services.length === 0) return "No services defined";
-      return services.map(p => {
-        const proc = processManager.getProcess(p.name);
-        const state = proc?.getState();
-        const parts = [`${p.name}: ${p.status}`];
-        if (p.port) parts.push(`port=${p.port}`);
-        if (state?.url) parts.push(`url=${state.url}`);
-        if (p.healthy !== undefined) parts.push(`healthy=${p.healthy}`);
+    case "list_tabs": {
+      if (!processManager || !tmuxManager) return "No tabs configured";
+      const tabs = processManager.listTabs();
+      if (tabs.length === 0) return "No tabs defined";
+      const sessionName = tmuxManager.sessionName;
+      const lines = tabs.map(t => {
+        const parts = [`${t.name}: ${t.type}`];
+        if (t.type === "service") {
+          parts.push(t.status ?? "unknown");
+          if (t.port) parts.push(`port=${t.port}`);
+          if (t.healthy !== undefined) parts.push(`healthy=${t.healthy}`);
+          parts.push(`log=${getServiceLogPath(sessionName, t.name)}`);
+        }
+        parts.push(`window=${t.windowIndex}`);
         return parts.join(" | ");
-      }).join("\n");
+      });
+      lines.push(`\nEvents: ${getEventsFilePath(sessionName)}`);
+      return lines.join("\n");
     }
 
     case "manage_service": {
-      if (!processManager) return "No services configured";
+      if (!processManager) return "No tabs configured";
       const { name, op } = args as { name: string; op: string };
+      // Reject operations on layout tabs
+      if (processManager.isLayoutTab(name)) {
+        return `Error: "${name}" is a layout tab - cannot start/stop/restart`;
+      }
       switch (op) {
         case "start":
           await processManager.startProcess(name);
@@ -360,13 +362,6 @@ async function executeCLITool(
         default:
           return `Unknown operation: ${op}`;
       }
-    }
-
-    case "capture_pane": {
-      const { name, lines } = args as { name: string; lines?: number };
-      if (!tmuxManager) return "No tmux session active";
-      const content = await tmuxManager.capturePane(name, lines ?? 100);
-      return content || "(no output)";
     }
 
     case "create_pane": {
@@ -383,78 +378,112 @@ async function executeCLITool(
       return `Removed pane "${name}"`;
     }
 
-    case "set_status": {
-      if (!tmuxManager) return "No tmux session active";
-      const { status, message } = args as { status: string; message?: string };
-      await tmuxManager.setStatus(status as "pending" | "running" | "completed" | "failed", message);
-      return `Status: ${status}${message ? ` - ${message}` : ""}`;
+    case "send_keys": {
+      if (!tmuxManager) return "No session active";
+      const { name, keys } = args as { name: string; keys: string };
+      await tmuxManager.sendKeys(name, keys);
+      return `Sent keys to "${name}"`;
     }
 
-    case "show_user_interaction": {
-      // Run ink-runner directly in terminal for CLI mode
-      const { spawn } = await import("child_process");
-      const { schema, ink_file, ink_args } = args as {
-        schema?: { questions: Array<{ question: string; header: string; inputType?: string }> };
+    case "run_interaction": {
+      // Run interaction in tmux pane via InteractionManager
+      const { schema, ink_file, ink_args, command, title, timeout_ms } = args as {
+        schema?: unknown;
         ink_file?: string;
-        ink_args?: Record<string, string>;
+        ink_args?: Record<string, unknown>;
+        command?: string;
+        title?: string;
+        timeout_ms?: number;
       };
 
-      // Find ink-runner
-      const __filename = (await import("url")).fileURLToPath(import.meta.url);
-      const __dirname = path.dirname(__filename);
-      const inkRunnerPath = path.join(__dirname, "ink-runner");
+      // Determine which tmux session to use for the interaction
+      let effectiveTmuxManager: TmuxManager | EmbeddedTmuxManager | undefined = tmuxManager;
 
-      // Build command args
-      const cmdArgs: string[] = [];
-      if (schema) {
-        cmdArgs.push("--schema", JSON.stringify(schema));
-      }
-      if (ink_file) {
-        let resolvedPath: string;
-        if (ink_file.startsWith("__builtin__/")) {
-          // Built-in component
-          resolvedPath = path.join(inkRunnerPath, "components", ink_file.replace("__builtin__/", ""));
-        } else {
-          // Resolve ink file path
-          const cwd = process.cwd();
-          const projectPath = path.join(cwd, ".mide/interactive", ink_file);
-          const globalPath = path.join(process.env.HOME || "", ".mide/interactive", ink_file);
-          resolvedPath = existsSync(projectPath) ? projectPath : existsSync(globalPath) ? globalPath : ink_file;
-        }
-        cmdArgs.push("--ink-file", resolvedPath);
-      }
-      if (ink_args) {
-        cmdArgs.push("--args", JSON.stringify(ink_args));
-      }
-
-      return new Promise((resolve) => {
-        const child = spawn("node", [path.join(inkRunnerPath, "dist/index.js"), ...cmdArgs], {
-          stdio: ["inherit", "pipe", "inherit"],
-          cwd: process.cwd(),
-        });
-
-        let output = "";
-        child.stdout?.on("data", (data) => {
-          const text = data.toString();
-          // Check for result prefix
-          if (text.includes("__MCP_RESULT__:")) {
-            const match = text.match(/__MCP_RESULT__:(.+)/);
-            if (match) {
-              try {
-                output = JSON.stringify(JSON.parse(match[1]), null, 2);
-              } catch {
-                output = match[1];
-              }
+      if (isInsideTmux() && !tmuxManager) {
+        // Inside tmux but no mide session passed - check if mide session exists
+        if (configExists()) {
+          try {
+            const { tmux: mideTmux } = await loadConfigAndTmux();
+            if (await mideTmux.sessionExists()) {
+              effectiveTmuxManager = mideTmux;
+              console.error(`[mide] Using mide session: ${mideTmux.sessionName}`);
             }
-          } else {
-            process.stdout.write(text);
+          } catch {
+            // Fall through to embedded mode
+          }
+        }
+
+        // Fallback to embedded mode if no mide session
+        if (!effectiveTmuxManager) {
+          try {
+            effectiveTmuxManager = await EmbeddedTmuxManager.create();
+            console.error(`[mide] Running in embedded mode (session: ${effectiveTmuxManager.getSessionName()})`);
+          } catch (err) {
+            console.error(`[mide] Failed to create embedded manager: ${err}`);
+          }
+        }
+      }
+
+      if (!effectiveTmuxManager) {
+        return "No active session - cannot run interaction";
+      }
+
+      // Create InteractionManager for this session
+      const sessionName = tmuxManager?.sessionName;
+      const interactionMgr = new InteractionManager({
+        tmuxManager: effectiveTmuxManager,
+        cwd: process.cwd(),
+        sessionName,
+      });
+
+      // Create the interaction
+      const interactionId = await interactionMgr.create({
+        schema: schema as import("@mcp-ide/shared").FormSchema | undefined,
+        inkFile: ink_file,
+        inkArgs: ink_args,
+        command,
+        title,
+        timeoutMs: timeout_ms,
+      });
+
+      // Non-blocking mode: timeout_ms === 0
+      if (timeout_ms === 0) {
+        return JSON.stringify({ interaction_id: interactionId, status: "started" });
+      }
+
+      // Blocking mode: wait for result
+      console.error(`[mide] Waiting for interaction in tmux pane...`);
+      return new Promise<string>((resolve) => {
+        interactionMgr.on("interactionComplete", (id: string, result: InteractionResult) => {
+          if (id === interactionId) {
+            resolve(JSON.stringify(result, null, 2));
           }
         });
-
-        child.on("close", () => {
-          resolve(output || "(no result)");
-        });
       });
+    }
+
+    case "reload_config": {
+      if (!processManager || !tmuxManager) return "No active session";
+      const newLoaded = await loadConfig();
+      const result = await processManager.reload(newLoaded.config);
+
+      // Emit reload event
+      emitReloadEvent(
+        tmuxManager.sessionName,
+        result.added,
+        result.removed,
+        result.changed,
+        result.tabsReloaded
+      );
+
+      const lines = ["Reload complete:"];
+      if (result.added.length > 0) lines.push(`  Added: ${result.added.join(", ")}`);
+      if (result.removed.length > 0) lines.push(`  Removed: ${result.removed.join(", ")}`);
+      if (result.changed.length > 0) lines.push(`  Changed: ${result.changed.join(", ")}`);
+      if (result.tabsReloaded) lines.push(`  Tabs: reloaded`);
+      if (lines.length === 1) lines.push("  No changes detected");
+
+      return lines.join("\n");
     }
 
     default:
@@ -475,22 +504,12 @@ const CreatePaneSchema = z.object({
   name: z.string().describe("Unique name for the pane"),
   command: z.string().describe("Command to run in the pane"),
   group: z.string().optional().describe("Group to place the pane in (default: 'dynamic')"),
-  mode: z.enum(["embedded", "standalone"]).optional().describe("Tmux mode: embedded (current session) or standalone (separate IDE session)"),
 });
 
 const RemovePaneSchema = z.object({
   name: z.string().describe("Name of the pane to remove"),
 });
 
-const CapturePaneSchema = z.object({
-  name: z.string().describe("Name of the pane to capture"),
-  lines: z.number().optional().describe("Number of lines to capture (default: 100)"),
-  parse_markers: z.boolean().optional().describe("Parse __MCP_PROGRESS__ and __MCP_RESULT__ markers from output"),
-});
-
-const GetUserInteractionSchema = z.object({
-  interaction_id: z.string().describe("Interaction ID from show_user_interaction"),
-});
 
 // Interaction tool schemas
 const FormQuestionSchema = z.object({
@@ -510,18 +529,15 @@ const FormSchemaSchema = z.object({
   questions: z.array(FormQuestionSchema).min(1).describe("Questions to ask"),
 });
 
-const ShowUserInteractionSchema = z.object({
+const RunInteractionSchema = z.object({
   schema: FormSchemaSchema.optional().describe("Form schema (AskUserQuestion-compatible)"),
   ink_file: z.string().optional().describe("Path to custom Ink component file (.tsx/.jsx)"),
-  title: z.string().optional().describe("Form title"),
-  group: z.string().optional().describe("tmux layout group"),
-  timeout_ms: z.number().optional().describe("Auto-cancel after N ms (default: blocks indefinitely)"),
+  ink_args: z.record(z.unknown()).optional().describe("Arguments to pass to Ink component"),
+  command: z.string().optional().describe("Shell command to run (alternative to ink_file/schema)"),
+  title: z.string().optional().describe("Title for the interaction"),
+  timeout_ms: z.number().optional().describe("Timeout in ms (0 = non-blocking)"),
 });
 
-const SetStatusSchema = z.object({
-  status: z.enum(["pending", "running", "completed", "failed"]),
-  message: z.string().optional(),
-});
 
 // Test blocking tool schema (for internal testing)
 const TestBlockingSchema = z.object({
@@ -531,10 +547,10 @@ const TestBlockingSchema = z.object({
 
 // MCP Tools - 7 tools
 const MCP_TOOLS: Tool[] = [
-  // Service tools (require mide.yaml)
+  // Tab tools (require mide.yaml)
   {
-    name: "list_services",
-    description: "List all services from mide.yaml with status, port, URL, and health",
+    name: "list_tabs",
+    description: "List all tabs from mide.yaml with type (service/layout), status, port, and health",
     inputSchema: {
       type: "object",
       properties: {},
@@ -543,7 +559,7 @@ const MCP_TOOLS: Tool[] = [
   },
   {
     name: "manage_service",
-    description: "Start, stop, or restart a service defined in mide.yaml",
+    description: "Start, stop, or restart a service tab defined in mide.yaml",
     inputSchema: {
       type: "object",
       properties: {
@@ -570,8 +586,8 @@ const MCP_TOOLS: Tool[] = [
     },
   },
   {
-    name: "show_user_interaction",
-    description: "Show an interactive Ink component or form to the user. Blocks until user completes.",
+    name: "run_interaction",
+    description: "Run an interactive component, form, or shell command in the Canvas (window 0). Blocks until completion.",
     inputSchema: {
       type: "object",
       properties: {
@@ -595,9 +611,11 @@ const MCP_TOOLS: Tool[] = [
             },
           },
         },
-        ink_file: { type: "string", description: "Path to Ink component (.tsx) - resolves from .mide/interactive/" },
-        title: { type: "string", description: "Title" },
-        timeout_ms: { type: "number", description: "Auto-cancel timeout in ms" },
+        ink_file: { type: "string", description: "Path to Ink component (.tsx/.jsx) - resolves from .mide/interactive/" },
+        ink_args: { type: "object", description: "Arguments to pass to the Ink component" },
+        command: { type: "string", description: "Shell command to run (alternative to ink_file/schema)" },
+        title: { type: "string", description: "Title for the interaction" },
+        timeout_ms: { type: "number", description: "Timeout in ms (0 = non-blocking, returns immediately)" },
       },
     },
   },
@@ -613,40 +631,25 @@ const MCP_TOOLS: Tool[] = [
     },
   },
   {
-    name: "capture_pane",
-    description: "Capture terminal output from a pane or service",
+    name: "send_keys",
+    description: "Send keystrokes to a pane (for interactive control)",
     inputSchema: {
       type: "object",
       properties: {
-        name: { type: "string", description: "Name of the pane or service" },
-        lines: { type: "number", description: "Number of lines to capture (default: 100)" },
-        parse_markers: { type: "boolean", description: "Parse __MCP_PROGRESS__ and __MCP_RESULT__ markers" },
+        name: { type: "string", description: "Name of the pane" },
+        keys: { type: "string", description: "Keys to send (e.g., 'Enter', 'C-c' for Ctrl+C)" },
       },
-      required: ["name"],
+      required: ["name", "keys"],
     },
   },
+  // Config reload tool
   {
-    name: "get_user_interaction",
-    description: "Get result from a completed interaction (works even if pane was killed)",
+    name: "reload_config",
+    description: "Reload mide.yaml configuration. Restarts changed service tabs.",
     inputSchema: {
       type: "object",
-      properties: {
-        interaction_id: { type: "string", description: "Interaction ID from show_user_interaction" },
-      },
-      required: ["interaction_id"],
-    },
-  },
-  // Status tool
-  {
-    name: "set_status",
-    description: "Update the terminal window title/status indicator",
-    inputSchema: {
-      type: "object",
-      properties: {
-        status: { type: "string", enum: ["pending", "running", "completed", "failed"] },
-        message: { type: "string", description: "Custom message" },
-      },
-      required: ["status"],
+      properties: {},
+      required: [],
     },
   },
 ];
@@ -673,51 +676,228 @@ async function main() {
       process.exit(0);
       break;
 
-    case "attach":
-      await commandAttach(parsedArgs.sessionName, parsedArgs.paneName);
-      // attach() doesn't return - it replaces the process
-      break;
+    case "connect": {
+      // Connect to session: create if needed, start tabs, attach/embed
+      const hasConfig = configExists();
+      let connectTmux: TmuxManager;
+      let sessionCreated = false;
 
-    case "up": {
-      // Start session and services
-      if (!configExists()) {
-        console.error("No mide.yaml found");
-        process.exit(1);
+      if (hasConfig) {
+        const { config: connectLoaded, tmux } = await loadConfigAndTmux();
+        connectTmux = tmux;
+
+        if (!(await connectTmux.sessionExists())) {
+          await connectTmux.createSession();
+          console.log(`Created session: ${connectTmux.sessionName}`);
+          sessionCreated = true;
+
+          const connectPm = new ProcessManager(connectLoaded.configDir, {
+            settings: connectLoaded.config.settings,
+            tmuxManager: connectTmux,
+          });
+          await connectPm.startAll(connectLoaded.config);
+
+          const tabs = connectPm.listProcesses();
+          console.log(`Started ${tabs.filter(s => s.status === "running").length}/${tabs.length} service tabs`);
+        }
+      } else {
+        // No config - create empty session based on directory name
+        const projectName = path.basename(process.cwd());
+        connectTmux = new TmuxManager(projectName);
+
+        if (!(await connectTmux.sessionExists())) {
+          await connectTmux.createSession();
+          console.log(`Created session: ${connectTmux.sessionName}`);
+          console.log(`No mide.yaml - session only (no tabs)`);
+          sessionCreated = true;
+        }
       }
-      const { config: upLoaded, tmux: upTmux } = await loadConfigAndTmux();
 
-      if (await upTmux.sessionExists()) {
-        console.log(`Session ${upTmux.sessionName} already running`);
-        console.log(`Attach with: mcp-ide attach`);
+      // If already inside tmux, create a split pane that attaches to the mide session
+      if (isInsideTmux()) {
+        const targetSession = connectTmux.sessionName;
+
+        // Get split direction from config (default: auto - smart detection based on pane size)
+        let splitDirection: "auto" | "right" | "left" | "top" | "bottom" = "auto";
+        if (hasConfig) {
+          const { config: loadedConfig } = await loadConfigAndTmux();
+          splitDirection = loadedConfig.config.settings?.splitDirection ?? "auto";
+        }
+
+        console.log(`Session ${targetSession} ready`);
+        console.log(`Creating split pane (direction: ${splitDirection})...`);
+
+        // Create embedded manager for current tmux session
+        const embedded = await EmbeddedTmuxManager.create();
+
+        // Create a split pane that attaches to the mide session
+        // Use TMUX= to allow nested tmux attachment
+        // Select window 0 (dashboard) first
+        const attachCmd = `TMUX= tmux select-window -t ${targetSession}:0 2>/dev/null; TMUX= tmux attach -t ${targetSession}`;
+        await embedded.createPane("mide-view", attachCmd, process.cwd(), undefined, {
+          direction: splitDirection,
+          skipRebalance: true,
+        });
+
+        console.log(`Opened ${targetSession} in split pane`);
         process.exit(0);
       }
 
-      await upTmux.createSession();
-      console.log(`Created session: ${upTmux.sessionName}`);
+      // Not inside tmux - attach directly
+      if (parsedArgs.paneName) {
+        console.log(`Attaching to ${connectTmux.sessionName} (pane: ${parsedArgs.paneName})...`);
+        await connectTmux.selectPane(parsedArgs.paneName);
+      } else if (!sessionCreated) {
+        console.log(`Attaching to ${connectTmux.sessionName}...`);
+      } else {
+        console.log(`Attaching...`);
+      }
+
+      const exitCode = await connectTmux.attach();
+      process.exit(exitCode);
+    }
+
+    case "up": {
+      // Start services in background, wait for ready (or -d for detached), return status
+      const hasConfig = configExists();
+      if (!hasConfig) {
+        if (parsedArgs.jsonOutput) {
+          console.log(JSON.stringify({ error: "No mide.yaml found" }));
+        } else {
+          console.error("No mide.yaml found in current directory");
+        }
+        process.exit(1);
+      }
+
+      const { config: upLoaded, tmux: upTmux } = await loadConfigAndTmux();
+      const upSessionName = upTmux.sessionName; // Use full session name with prefix
+      const sessionAlreadyExists = await upTmux.sessionExists();
+
+      if (!sessionAlreadyExists) {
+        await upTmux.createSession();
+        if (!parsedArgs.jsonOutput) {
+          console.log(`Created session: ${upSessionName}`);
+        }
+      }
 
       const upPm = new ProcessManager(upLoaded.configDir, {
         settings: upLoaded.config.settings,
         tmuxManager: upTmux,
       });
-      await upPm.startAll(upLoaded.config);
 
-      const services = upPm.listProcesses();
-      console.log(`Started ${services.filter(s => s.status === "running").length}/${services.length} services`);
-      console.log(`Attach with: mcp-ide attach`);
-
-      if (upLoaded.config.settings?.autoAttachTerminal) {
-        upTmux.openTerminal();
+      if (!sessionAlreadyExists) {
+        await upPm.startAll(upLoaded.config);
+      } else {
+        // Session exists - just load processes to get status
+        await upPm.loadProcesses(upLoaded.config);
       }
-      process.exit(0);
+
+      // Helper to format status output
+      const formatStatus = () => {
+        const tabs = upPm.listTabs();
+        const services = tabs.filter(t => t.type === "service");
+        const ready = services.filter(s => s.status === "running" || s.status === "ready");
+
+        if (parsedArgs.jsonOutput) {
+          return JSON.stringify({
+            session: upSessionName,
+            status: ready.length === services.length ? "ready" : "starting",
+            services: services.map(s => ({
+              name: s.name,
+              status: s.status ?? "unknown",
+              port: s.port,
+              healthy: s.healthy,
+            })),
+            eventsFile: getEventsFilePath(upSessionName),
+            logsDir: getSessionLogDir(upSessionName),
+          }, null, 2);
+        } else {
+          const lines = [
+            `Session: ${upSessionName}`,
+            `Status: ${ready.length}/${services.length} services ready`,
+            "",
+            "Services:",
+          ];
+          for (const svc of services) {
+            const statusIcon = svc.status === "running" || svc.status === "ready" ? "✓" :
+                              svc.status === "starting" ? "⋯" :
+                              svc.status === "crashed" ? "✗" : "○";
+            const portStr = svc.port ? `:${svc.port}` : "";
+            const healthStr = svc.healthy !== undefined ? (svc.healthy ? " [healthy]" : " [unhealthy]") : "";
+            lines.push(`  ${statusIcon} ${svc.name}${portStr} - ${svc.status ?? "unknown"}${healthStr}`);
+          }
+          lines.push("");
+          lines.push(`Events: ${getEventsFilePath(upSessionName)}`);
+          lines.push(`Logs: ${getSessionLogDir(upSessionName)}`);
+          return lines.join("\n");
+        }
+      };
+
+      // Detached mode: return immediately
+      if (parsedArgs.detach) {
+        console.log(formatStatus());
+        process.exit(0);
+      }
+
+      // Default: wait for all services to be ready
+      if (!parsedArgs.jsonOutput) {
+        console.log("Waiting for services to be ready...");
+      }
+
+      // Poll for status until all services are ready (or timeout after 60s)
+      const startTime = Date.now();
+      const timeout = 60000;
+
+      while (Date.now() - startTime < timeout) {
+        const tabs = upPm.listTabs();
+        const services = tabs.filter(t => t.type === "service");
+        const ready = services.filter(s => s.status === "running" || s.status === "ready");
+        const failed = services.filter(s => s.status === "crashed" || s.status === "stopped");
+
+        // All ready or some failed
+        if (ready.length + failed.length === services.length) {
+          console.log(formatStatus());
+          process.exit(failed.length > 0 ? 1 : 0);
+        }
+
+        // JSON mode: stream events as they happen
+        if (parsedArgs.jsonOutput) {
+          const events = readEvents(upSessionName);
+          for (const event of events.slice(-5)) { // Last 5 events
+            if (event.ts > startTime) {
+              console.log(JSON.stringify(event));
+            }
+          }
+        }
+
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+
+      // Timeout
+      if (parsedArgs.jsonOutput) {
+        console.log(JSON.stringify({ error: "timeout", message: "Services did not become ready within 60s" }));
+      } else {
+        console.error("Timeout: services did not become ready within 60s");
+      }
+      console.log(formatStatus());
+      process.exit(1);
     }
 
     case "down": {
-      // Stop services and kill session
-      if (!configExists()) {
-        console.error("No mide.yaml found");
-        process.exit(1);
+      // Stop tabs and kill session
+      let downTmux: TmuxManager;
+      let downSessionName: string;
+
+      if (configExists()) {
+        const loaded = await loadConfigAndTmux();
+        downTmux = loaded.tmux;
+        downSessionName = loaded.sessionName;
+      } else {
+        // No config - use default session name
+        const projectName = path.basename(process.cwd());
+        downTmux = new TmuxManager(projectName);
+        downSessionName = downTmux.sessionName;
       }
-      const { tmux: downTmux, sessionName: downSessionName } = await loadConfigAndTmux();
 
       if (!(await downTmux.sessionExists())) {
         console.log(`No active session for ${downSessionName}`);
@@ -729,6 +909,29 @@ async function main() {
       process.exit(0);
     }
 
+    case "gc": {
+      // Clean up stale sessions
+      const sessions = await listIdeSessions();
+      const staleSessions = sessions.filter(s => s.isStale);
+
+      if (staleSessions.length === 0) {
+        console.log("No stale sessions found.");
+        process.exit(0);
+      }
+
+      console.log(`Found ${staleSessions.length} stale session(s):`);
+      for (const session of staleSessions) {
+        console.log(`  ${session.name} (${session.windows} windows, owner PID ${session.ownerPid || "unknown"} not running)`);
+      }
+
+      for (const session of staleSessions) {
+        await cleanupStaleSession(session.name);
+        console.log(`Cleaned up: ${session.name}`);
+      }
+
+      process.exit(0);
+    }
+
     case "cli-tool": {
       // Execute CLI tool command
       if (!parsedArgs.toolName || !parsedArgs.toolArgs) {
@@ -737,16 +940,27 @@ async function main() {
       }
 
       // Tools that don't require mide.yaml or active session
-      const standaloneTools = ["show_user_interaction"];
+      const standaloneTools: string[] = [];
       const isStandalone = standaloneTools.includes(parsedArgs.toolName);
 
-      // Tools that require mide.yaml and services
-      const serviceTools = ["list_services", "manage_service"];
-      const needsServices = serviceTools.includes(parsedArgs.toolName);
+      // Tools that require mide.yaml and tabs
+      const tabTools = ["list_tabs", "manage_service"];
+      const needsTabs = tabTools.includes(parsedArgs.toolName);
+
+      // Tools that require an active session (but not necessarily tabs)
+      // show_user_interaction can work in embedded mode (inside tmux) without mide.yaml
+      const sessionTools = ["create_pane", "remove_pane", "send_keys"];
+      const embeddableTools = ["show_user_interaction"];  // Can work in embedded mode without config
+      const needsSession = sessionTools.includes(parsedArgs.toolName);
+      const canUseEmbedded = embeddableTools.includes(parsedArgs.toolName) && isInsideTmux();
 
       const hasConfig = configExists();
-      if (!hasConfig && needsServices) {
-        console.error("No mide.yaml found - service management not available");
+      if (!hasConfig && needsTabs) {
+        console.error("No mide.yaml found - cannot determine session. Run from a directory with mide.yaml");
+        process.exit(1);
+      }
+      if (!hasConfig && needsSession && !canUseEmbedded) {
+        console.error("No mide.yaml found - cannot determine session. Run from a directory with mide.yaml");
         process.exit(1);
       }
 
@@ -766,6 +980,9 @@ async function main() {
           settings: cliLoaded.config.settings,
           tmuxManager: cliTmuxManager,
         });
+
+        // Load process definitions to query status (doesn't start them)
+        await cliProcessManager.loadProcesses(cliLoaded.config);
       }
 
       const result = await executeCLITool(
@@ -788,8 +1005,8 @@ async function main() {
 
   // Check if tmux is available (required)
   if (!(await isTmuxAvailable())) {
-    console.error("[mide] Error: tmux is required but not found.");
-    console.error("[mide] Install tmux: brew install tmux (macOS) or apt install tmux (Linux)");
+    console.error("[mide] Error: Required dependency not found.");
+    console.error("[mide] Install: brew install tmux (macOS) or apt install tmux (Linux)");
     process.exit(1);
   }
 
@@ -807,6 +1024,7 @@ async function main() {
   let tmuxManager: TmuxManager | undefined;
   let embeddedTmuxManager: EmbeddedTmuxManager | undefined;
   let interactionManager: InteractionManager | undefined;
+  let fileWatcher: FileWatcher | undefined;
 
   // Initialize embedded tmux manager if running inside tmux
   if (isInsideTmux()) {
@@ -816,8 +1034,9 @@ async function main() {
 
       // Initialize interaction manager for embedded mode (works without mide.yaml)
       // Uses ~/.mide/interactive/ for global components
+      // Note: sessionName not available for embedded mode (no mide session)
       interactionManager = new InteractionManager({
-        tmuxManager: embeddedTmuxManager as unknown as TmuxManager,
+        tmuxManager: embeddedTmuxManager,
         cwd: workspaceDir,
       });
     } catch (err) {
@@ -832,7 +1051,7 @@ async function main() {
     tmuxManager = tmux;
     await tmuxManager.createSession();
 
-    console.error(`[mide] Created tmux session: ${tmuxManager.sessionName}`);
+    console.error(`[mide] Created session: ${tmuxManager.sessionName}`);
 
     // Initialize process manager with tmux
     processManager = new ProcessManager(configDir, {
@@ -846,42 +1065,79 @@ async function main() {
     interactionManager = new InteractionManager({
       tmuxManager,
       cwd: configDir,  // Project root for resolving .mide/interactive paths
+      sessionName: tmuxManager.sessionName,
     });
 
-    // Auto-attach terminal if configured and there are services to show
-    const hasServices = Object.keys(config.services || {}).length > 0;
-    if (config.settings?.autoAttachTerminal && hasServices) {
-      await tmuxManager.openTerminal(config.settings?.terminalApp, configDir);
-    } else if (hasServices) {
-      console.error(`[mide] Attach with: tmux attach -t ${tmuxManager.sessionName}`);
+    // Initialize file watcher for hot-reload (if enabled)
+    const hotReloadEnabled = config?.settings?.hotReload ?? true;
+    if (hotReloadEnabled) {
+      // Find the config file to watch
+      const configFilePath = existsSync(path.join(configDir, "mide.yaml"))
+        ? path.join(configDir, "mide.yaml")
+        : path.join(configDir, "mide.yml");
+
+      fileWatcher = new FileWatcher({ configPath: configFilePath });
+
+      fileWatcher.on("configChanged", async () => {
+        console.error("[mide] Config file changed, reloading...");
+        try {
+          const newLoaded = await loadConfig();
+          const result = await processManager!.reload(newLoaded.config);
+
+          console.error(`[mide] Reload complete: +${result.added.length} -${result.removed.length} ~${result.changed.length}`);
+          if (result.tabsReloaded) {
+            console.error("[mide] Dashboard layout updated");
+          }
+
+          // Emit reload event
+          emitReloadEvent(
+            tmuxManager!.sessionName,
+            result.added,
+            result.removed,
+            result.changed,
+            result.tabsReloaded
+          );
+        } catch (err) {
+          console.error("[mide] Reload failed:", err);
+        }
+      });
+
+      fileWatcher.start();
+      console.error("[mide] Hot-reload enabled: watching mide.yaml for changes");
     }
+
   }
 
   // Tool handler
   async function handleToolCall(name: string, args: Record<string, unknown>) {
     switch (name) {
-      case "list_services": {
-        if (!processManager) {
-          return formatToolError("No mide.yaml found - service management not available");
+      case "list_tabs": {
+        if (!processManager || !tmuxManager) {
+          return formatToolError("No mide.yaml found - tab management not available");
         }
-        const services = processManager.listProcesses();
-        if (services.length === 0) {
+        const tabs = processManager.listTabs();
+        if (tabs.length === 0) {
           return {
-            content: [{ type: "text", text: "No services defined in mide.yaml" }],
+            content: [{ type: "text", text: "No tabs defined in mide.yaml" }],
           };
         }
-        // Return full status including URL
-        const formatted = services.map((p) => {
-          const proc = processManager!.getProcess(p.name);
-          const state = proc?.getState();
-          const parts = [`${p.name}: ${p.status}`];
-          if (p.port) parts.push(`port=${p.port}`);
-          if (state?.url) parts.push(`url=${state.url}`);
-          if (p.healthy !== undefined) parts.push(`healthy=${p.healthy}`);
-          if (state?.pid) parts.push(`pid=${state.pid}`);
-          if (p.error) parts.push(`error=${p.error}`);
+        const sessionName = tmuxManager.sessionName;
+        const formatted = tabs.map((t) => {
+          const parts = [`${t.name}: ${t.type}`];
+          if (t.type === "service") {
+            const proc = processManager!.getProcess(t.name);
+            const state = proc?.getState();
+            parts.push(t.status ?? "unknown");
+            if (t.port) parts.push(`port=${t.port}`);
+            if (state?.url) parts.push(`url=${state.url}`);
+            if (t.healthy !== undefined) parts.push(`healthy=${t.healthy}`);
+            if (state?.pid) parts.push(`pid=${state.pid}`);
+            parts.push(`log=${getServiceLogPath(sessionName, t.name)}`);
+          }
+          parts.push(`window=${t.windowIndex}`);
           return parts.join(" | ");
         });
+        formatted.push(`\nEvents: ${getEventsFilePath(sessionName)}`);
         return {
           content: [{ type: "text", text: formatted.join("\n") }],
         };
@@ -892,6 +1148,10 @@ async function main() {
           return formatToolError("No mide.yaml found - service management not available");
         }
         const parsed = ManageServiceSchema.parse(args);
+        // Reject operations on layout tabs
+        if (processManager.isLayoutTab(parsed.name)) {
+          return formatToolError(`"${parsed.name}" is a layout tab - cannot start/stop/restart`);
+        }
         switch (parsed.op) {
           case "start":
             await processManager.startProcess(parsed.name, {
@@ -918,13 +1178,8 @@ async function main() {
       case "create_pane": {
         const parsed = CreatePaneSchema.parse(args);
 
-        // Determine effective mode: tool param > config > auto-detect
-        const effectiveMode = parsed.mode
-          ?? config?.settings?.tmuxMode
-          ?? (isInsideTmux() ? "embedded" : "standalone");
-
-        // Embedded mode: create pane in user's current tmux session
-        if (effectiveMode === "embedded" && embeddedTmuxManager) {
+        // Use embedded mode if inside tmux, otherwise use standalone mide session
+        if (isInsideTmux() && embeddedTmuxManager) {
           const paneId = await embeddedTmuxManager.createPane(
             parsed.name,
             parsed.command,
@@ -933,20 +1188,16 @@ async function main() {
           return {
             content: [{
               type: "text",
-              text: `Created embedded terminal "${parsed.name}"\n` +
+              text: `Created pane "${parsed.name}"\n` +
                 `Command: ${parsed.command}\n` +
-                `Pane ID: ${paneId}\n` +
-                `Session: ${embeddedTmuxManager.getSessionName()}`
+                `Pane ID: ${paneId}`
             }],
           };
         }
 
         // Standalone mode: use separate MIDE session (requires config)
         if (!processManager || !tmuxManager) {
-          if (effectiveMode === "embedded" && !embeddedTmuxManager) {
-            return formatToolError("Embedded mode requires running inside tmux");
-          }
-          return formatToolError("Standalone mode requires mide.yaml");
+          return formatToolError("Requires mide.yaml or running inside tmux");
         }
 
         const terminal = await processManager.createDynamicTerminal(
@@ -954,11 +1205,6 @@ async function main() {
           parsed.command,
           parsed.group
         );
-
-        // Auto-open terminal if not already attached (skip if inside tmux - user can switch manually)
-        if (config?.settings?.autoAttachTerminal !== false && !isInsideTmux()) {
-          await tmuxManager.openTerminal(config?.settings?.terminalApp, configDir);
-        }
 
         const groups = processManager.getAvailableGroups();
         return {
@@ -993,105 +1239,41 @@ async function main() {
         };
       }
 
-      case "capture_pane": {
-        const parsed = CapturePaneSchema.parse(args);
-        const lines = parsed.lines ?? 100;
+      // Removed: capture_pane, get_user_interaction, set_status
+      // Claude uses tail -f on log files directly for real-time logs
 
-        let content: string | null = null;
-
-        // Try embedded manager first
-        if (embeddedTmuxManager?.hasPane(parsed.name)) {
-          content = await embeddedTmuxManager.capturePane(parsed.name, lines);
-        } else if (tmuxManager) {
-          // Try standalone tmux manager
-          content = await tmuxManager.capturePane(parsed.name, lines);
+      case "reload_config": {
+        if (!processManager || !tmuxManager) {
+          return formatToolError("No mide.yaml found - reload not available");
         }
 
-        if (content === null) {
-          return formatToolError("Pane not found or no tmux session active");
-        }
-
-        // Parse markers if requested
-        if (parsed.parse_markers) {
-          const progress: unknown[] = [];
-          let result: unknown = null;
-
-          for (const line of content.split("\n")) {
-            if (line.includes("__MCP_PROGRESS__:")) {
-              const jsonStr = line.split("__MCP_PROGRESS__:")[1];
-              try {
-                progress.push(JSON.parse(jsonStr));
-              } catch { /* ignore parse errors */ }
-            }
-            if (line.includes("__MCP_RESULT__:")) {
-              const jsonStr = line.split("__MCP_RESULT__:")[1];
-              try {
-                result = JSON.parse(jsonStr);
-              } catch { /* ignore parse errors */ }
-            }
-          }
-
-          return {
-            content: [{
-              type: "text",
-              text: JSON.stringify({ progress, result, raw: content }),
-            }],
-          };
-        }
-
-        return {
-          content: [{ type: "text", text: content || "(no output)" }],
-        };
-      }
-
-      case "get_user_interaction": {
-        if (!interactionManager) {
-          return formatToolError("Interaction tools not available - tmux required");
-        }
-
-        const parsed = GetUserInteractionSchema.parse(args);
-        const state = interactionManager.getState(parsed.interaction_id);
-
-        // Check in-memory state first
-        if (state?.result) {
-          return {
-            content: [{ type: "text", text: JSON.stringify(state.result) }],
-          };
-        }
-
-        // Try reading from file directly (handles case where pane was killed)
-        const filePath = `/tmp/mcp-interaction-${parsed.interaction_id}.result`;
         try {
-          if (existsSync(filePath)) {
-            const fileContent = readFileSync(filePath, "utf-8");
-            const result = JSON.parse(fileContent);
-            return {
-              content: [{ type: "text", text: JSON.stringify(result) }],
-            };
-          }
-        } catch { /* ignore read errors */ }
+          const newLoaded = await loadConfig();
+          const result = await processManager.reload(newLoaded.config);
 
-        // Still pending or not found
-        return {
-          content: [{ type: "text", text: JSON.stringify({ status: "pending" }) }],
-        };
-      }
+          // Emit reload event
+          emitReloadEvent(
+            tmuxManager.sessionName,
+            result.added,
+            result.removed,
+            result.changed,
+            result.tabsReloaded
+          );
 
-      case "set_status": {
-        const parsed = SetStatusSchema.parse(args);
+          const summary = [
+            `Reload complete:`,
+            `  Added: ${result.added.length > 0 ? result.added.join(", ") : "none"}`,
+            `  Removed: ${result.removed.length > 0 ? result.removed.join(", ") : "none"}`,
+            `  Changed: ${result.changed.length > 0 ? result.changed.join(", ") : "none"}`,
+            `  Tabs: ${result.tabsReloaded ? "reloaded" : "unchanged"}`,
+          ].join("\n");
 
-        // Use embedded manager if available, otherwise standalone
-        if (embeddedTmuxManager) {
-          await embeddedTmuxManager.setStatus(parsed.status, parsed.message);
-        } else if (tmuxManager) {
-          await tmuxManager.setStatus(parsed.status, parsed.message);
-        } else {
-          return formatToolError("No tmux session active");
+          return {
+            content: [{ type: "text", text: summary }],
+          };
+        } catch (err) {
+          return formatToolError(`Reload failed: ${err instanceof Error ? err.message : String(err)}`);
         }
-
-        return {
-          content: [{ type: "text", text: `Status: ${parsed.status}${parsed.message ? ` - ${parsed.message}` : ""}` }],
-        };
       }
 
       default:
@@ -1122,7 +1304,7 @@ async function main() {
     } else if (embeddedTmuxManager) {
       // Embedded mode: pane tools only (no service management)
       tools = MCP_TOOLS.filter(t =>
-        ["create_pane", "show_user_interaction", "remove_pane", "capture_pane", "get_user_interaction", "set_status"].includes(t.name)
+        ["create_pane", "run_interaction", "remove_pane", "send_keys"].includes(t.name)
       );
     }
     // Minimal mode: no tools (tmux not available)
@@ -1189,38 +1371,44 @@ async function main() {
         };
       }
 
-      // Handle show_user_interaction (needs server access for progress notifications)
-      if (name === "show_user_interaction") {
+      // Handle run_interaction (needs server access for progress notifications)
+      if (name === "run_interaction") {
         if (!interactionManager) {
-          return formatToolError("Interaction tools not available - tmux required");
+          return formatToolError("Interaction tools require an active session");
         }
 
-        const parsed = ShowUserInteractionSchema.parse(args);
+        const parsed = RunInteractionSchema.parse(args);
 
-        if (!parsed.schema && !parsed.ink_file) {
-          return formatToolError("Either schema or ink_file is required");
+        if (!parsed.schema && !parsed.ink_file && !parsed.command) {
+          return formatToolError("Either schema, ink_file, or command is required");
         }
 
         const interactionId = await interactionManager.create({
           schema: parsed.schema,
           inkFile: parsed.ink_file,
+          inkArgs: parsed.ink_args,
+          command: parsed.command,
           title: parsed.title,
-          group: parsed.group,
           timeoutMs: parsed.timeout_ms,
         });
 
-        // Auto-open terminal if not already attached (skip if inside tmux - user can switch manually)
-        if (tmuxManager && config?.settings?.autoAttachTerminal !== false && !isInsideTmux()) {
-          await tmuxManager.openTerminal(config?.settings?.terminalApp, configDir);
+        // Non-blocking mode: timeout_ms === 0
+        if (parsed.timeout_ms === 0) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({ interaction_id: interactionId, status: "started" })
+            }],
+          };
         }
 
-        // Blocking mode with progress heartbeats (always blocks now)
+        // Blocking mode with progress heartbeats
         const progressToken = request.params._meta?.progressToken;
         const heartbeatIntervalMs = 25000;
         const startTime = Date.now();
         let heartbeatCount = 0;
 
-        console.error(`[mide] show_user_interaction: id=${interactionId}, progressToken=${progressToken}`);
+        console.error(`[mide] run_interaction: id=${interactionId}, progressToken=${progressToken}`);
 
         while (true) {
           // Wait for result with short timeout
@@ -1247,7 +1435,7 @@ async function main() {
           }
 
           // Check tool-level timeout if specified
-          if (parsed.timeout_ms) {
+          if (parsed.timeout_ms && parsed.timeout_ms > 0) {
             const elapsed = Date.now() - startTime;
             if (elapsed >= parsed.timeout_ms) {
               await interactionManager.cancel(interactionId);
@@ -1281,6 +1469,19 @@ async function main() {
         }
       }
 
+      // Handle send_keys
+      if (name === "send_keys") {
+        const { name: paneName, keys } = args as { name: string; keys: string };
+        if (!tmuxManager && !embeddedTmuxManager) {
+          return formatToolError("No active session");
+        }
+        const mgr = tmuxManager ?? embeddedTmuxManager;
+        await mgr!.sendKeys(paneName, keys);
+        return {
+          content: [{ type: "text", text: `Sent keys to "${paneName}"` }],
+        };
+      }
+
       return await handleToolCall(name, args as Record<string, unknown>);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -1298,6 +1499,11 @@ async function main() {
     console.error("[mide] Shutting down...");
 
     try {
+      // Stop file watcher first
+      if (fileWatcher) {
+        fileWatcher.stop();
+      }
+
       // Stop all pending interactions first
       if (interactionManager) {
         await interactionManager.stopAll();
@@ -1327,9 +1533,15 @@ async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
-  console.error("[mide] MCP server running");
+  // Clean up when Claude disconnects
+  server.onclose = () => {
+    console.error("[mide] Claude disconnected - cleaning up session");
+    shutdown();
+  };
+
+  console.error("[mide] Server running");
   if (processManager && tmuxManager) {
-    console.error(`[mide] Managing ${processManager.listProcesses().length} services in tmux session: ${tmuxManager.sessionName}`);
+    console.error(`[mide] Managing ${processManager.listProcesses().length} tabs in session: ${tmuxManager.sessionName}`);
   }
 }
 

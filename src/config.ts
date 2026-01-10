@@ -36,65 +36,111 @@ export const ProcessConfigSchema = z.object({
 
 export type ProcessConfig = z.infer<typeof ProcessConfigSchema>;
 
-// Simple layout presets
-export const SimpleLayoutSchema = z.enum([
-  "horizontal",   // Processes side by side (even-horizontal)
-  "vertical",     // Processes stacked (even-vertical)
-  "grid",         // Automatic grid layout (tiled)
-  "main-left",    // First process large on left, others stacked right (main-vertical)
-  "main-top",     // First process large on top, others below (main-horizontal)
+// Reserved tab names that cannot be used
+const RESERVED_TAB_NAMES = ["__welcome__", "mide"];
+
+// Validate tab name: no reserved names, no special tmux chars
+export function validateTabName(name: string): { valid: boolean; error?: string } {
+  if (RESERVED_TAB_NAMES.includes(name)) {
+    return { valid: false, error: `"${name}" is a reserved name` };
+  }
+  if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+    return { valid: false, error: `"${name}" contains invalid characters (use only alphanumeric, dash, underscore)` };
+  }
+  return { valid: true };
+}
+
+// Layout tab pane config: string (command=name) or object {name, command}
+export const DashboardPaneSchema = z.union([
+  z.string().describe("Command to run (name defaults to command)"),
+  z.object({
+    name: z.string().describe("Pane name"),
+    command: z.string().describe("Command to run"),
+  }),
 ]);
 
-export type SimpleLayout = z.infer<typeof SimpleLayoutSchema>;
+export type DashboardPane = z.infer<typeof DashboardPaneSchema>;
 
-// Grouped layout with explicit process arrangement using named groups
-export const GroupedLayoutSchema = z.object({
-  type: z.enum(["rows", "columns"]).describe("Arrange groups as rows (top to bottom) or columns (left to right)"),
-  groups: z.record(z.string(), z.array(z.string())).describe("Named groups of processes: { servers: [frontend, backend], tools: [worker] }"),
-});
+// Dashboard row: array of panes that will be arranged as columns
+export const DashboardRowSchema = z.array(DashboardPaneSchema);
 
-export type GroupedLayout = z.infer<typeof GroupedLayoutSchema>;
+export type DashboardRow = z.infer<typeof DashboardRowSchema>;
 
-// Combined layout type: simple string or grouped object
-export const LayoutSchema = z.union([SimpleLayoutSchema, GroupedLayoutSchema]).default("grid");
+// Dashboard config: array of panes (flat) or rows (nested)
+// Flat: [a, b, c] -> tiled layout
+// Nested: [[a, b], [c, d]] -> rows of columns (2x2 grid)
+export const DashboardSchema = z.array(
+  z.union([DashboardPaneSchema, DashboardRowSchema])
+);
 
-export type Layout = z.infer<typeof LayoutSchema>;
+export type Dashboard = z.infer<typeof DashboardSchema>;
 
-// Map simple layout names to tmux layout names
-export const LAYOUT_TO_TMUX: Record<SimpleLayout, string> = {
-  "horizontal": "even-horizontal",
-  "vertical": "even-vertical",
-  "grid": "tiled",
-  "main-left": "main-vertical",
-  "main-top": "main-horizontal",
-};
-
-// Helper to check if layout is grouped
-export function isGroupedLayout(layout: Layout): layout is GroupedLayout {
-  return typeof layout === "object" && "type" in layout && "groups" in layout;
+// Helper to normalize dashboard pane to {name, command}
+export function normalizeDashboardPane(pane: DashboardPane): { name: string; command: string } {
+  if (typeof pane === "string") {
+    // Extract name from command (first word or full string if simple)
+    const name = pane.split(/\s+/)[0] || pane;
+    return { name, command: pane };
+  }
+  return pane;
 }
 
-// Get ordered group names from a grouped layout
-export function getGroupNames(layout: GroupedLayout): string[] {
-  return Object.keys(layout.groups);
+// Tab config: string (command), array (layout), or object (service with options)
+export const TabConfigSchema = z.union([
+  z.string().describe("Command to run (single pane service)"),
+  DashboardSchema.describe("Layout array (multi-pane tab)"),
+  ProcessConfigSchema.describe("Service with options"),
+]);
+
+export type TabConfig = z.infer<typeof TabConfigSchema>;
+
+// Tabs config: named tabs with their configurations
+export const TabsSchema = z.record(z.string(), TabConfigSchema);
+
+export type TabsConfig = z.infer<typeof TabsSchema>;
+
+// Helper to determine tab type from config
+export function getTabType(config: TabConfig): "service" | "layout" {
+  if (typeof config === "string") return "service";
+  if (Array.isArray(config)) return "layout";
+  return "service"; // object with command
 }
 
-// Get group entries in order: [groupName, processes[]]
-export function getGroupEntries(layout: GroupedLayout): [string, string[]][] {
-  return Object.entries(layout.groups);
+// Helper to normalize tab config to service format
+export function normalizeTabToService(name: string, config: TabConfig): ProcessConfig | null {
+  if (typeof config === "string") {
+    return { command: config, restartPolicy: "onFailure", maxRestarts: 5, autoStart: true, force: false };
+  }
+  if (Array.isArray(config)) {
+    return null; // Layout tab, not a service
+  }
+  return config; // Already a ProcessConfig
 }
 
-// Terminal app types (warp not supported - falls back to terminal)
-export const TerminalAppSchema = z.enum([
-  "auto",
-  "tmux",      // Use tmux window if inside tmux, otherwise print attach command
-  "ghostty",
-  "iterm",
-  "kitty",
-  "terminal",
-]).default("auto");
+// Helper to check if dashboard has nested rows
+export function isDashboardNested(dashboard: Dashboard): boolean {
+  return dashboard.some((item) => Array.isArray(item));
+}
 
-export type TerminalApp = z.infer<typeof TerminalAppSchema>;
+// Helper to normalize dashboard to rows format
+// Flat: [a, b, c] -> [[a, b, c]] (single row)
+// Nested: [[a, b], [c, d]] -> [[a, b], [c, d]] (already rows)
+export function normalizeDashboardToRows(dashboard: Dashboard): DashboardRow[] {
+  if (!isDashboardNested(dashboard)) {
+    // Flat array: treat all as single row (will use tiled layout)
+    return [dashboard as DashboardPane[]];
+  }
+  // Nested: return as rows
+  return dashboard.map((item) =>
+    Array.isArray(item) ? item : [item]
+  ) as DashboardRow[];
+}
+
+// Split direction for embedded pane (when Claude runs inside tmux)
+// "auto" = smart detection based on pane dimensions (split along longer axis)
+export const SplitDirectionSchema = z.enum(["auto", "right", "left", "top", "bottom"]).default("auto");
+
+export type SplitDirection = z.infer<typeof SplitDirectionSchema>;
 
 
 // Schema for configurable settings
@@ -130,54 +176,56 @@ export const SettingsSchema = z.object({
     .default(5000)
     .describe("Timeout for graceful process stop in milliseconds (default: 5000)"),
   // Tmux settings
-  layout: LayoutSchema
-    .describe("Pane layout: horizontal, vertical, grid, main-left, main-top (default: grid)"),
   tmuxSessionPrefix: z
     .string()
     .default("mide")
     .describe("Prefix for tmux session names (default: mide)"),
-  // Auto-attach terminal
-  autoAttachTerminal: z
-    .boolean()
-    .default(false)
-    .describe("Auto-open terminal attached to tmux session"),
-  // Terminal app preference
-  terminalApp: TerminalAppSchema
-    .describe("Terminal app to use: auto (detect), ghostty, iterm, kitty, warp, terminal"),
-  // Tmux mode for when running inside tmux
-  tmuxMode: z
-    .enum(["embedded", "standalone"])
-    .optional()
-    .describe("Tmux mode: embedded (panes in current session) or standalone (separate IDE session)"),
+  // Split direction when running inside tmux
+  splitDirection: SplitDirectionSchema
+    .describe("Direction to split pane: right, left, top, bottom (default: right)"),
   // Custom session name (supports env vars: $VAR or ${VAR})
   sessionName: z
     .string()
     .optional()
     .describe("Custom session name (supports $ENV_VAR). Overrides auto-detection from directory name."),
+  // Hot-reload setting
+  hotReload: z
+    .boolean()
+    .default(true)
+    .describe("Enable automatic config reload when mide.yaml changes (default: true)"),
 });
 
 export type Settings = z.infer<typeof SettingsSchema>;
 
 // Schema for the full config file
-// Supports both "services" (preferred) and "processes" (legacy) keys
 export const ConfigSchema = z.object({
-  // Top-level shortcuts
-  layout: LayoutSchema.optional().describe("Pane layout shorthand (overrides settings.layout)"),
+  // Tabs: unified config for all named tabs (services and layouts)
+  tabs: TabsSchema.optional().describe("Named tabs. String = service command, array = layout panes, object = service with options."),
   // Full settings
   settings: SettingsSchema.optional().describe("Global settings for the IDE"),
-  // Services (preferred) or processes (legacy alias)
-  services: z.record(ProcessConfigSchema).optional(),
-  processes: z.record(ProcessConfigSchema).optional(),
 }).refine(
-  (data) => data.services || data.processes,
-  { message: "Either 'services' or 'processes' must be defined" }
-).transform((data) => ({
-  ...data,
-  // Normalize: use services if present, otherwise use processes
-  services: data.services || data.processes || {},
-  // Keep processes for backward compat but services takes precedence
-  processes: data.services || data.processes || {},
-}));
+  (data) => data.tabs && Object.keys(data.tabs).length > 0,
+  { message: "At least one tab must be defined in 'tabs'" }
+).refine(
+  (data) => {
+    if (!data.tabs) return true;
+    for (const name of Object.keys(data.tabs)) {
+      const result = validateTabName(name);
+      if (!result.valid) return false;
+    }
+    return true;
+  },
+  (data) => {
+    if (!data.tabs) return { message: "No tabs defined" };
+    for (const name of Object.keys(data.tabs)) {
+      const result = validateTabName(name);
+      if (!result.valid) {
+        return { message: `Invalid tab name: ${result.error}` };
+      }
+    }
+    return { message: "Invalid tab name" };
+  }
+);
 
 export type Config = z.infer<typeof ConfigSchema>;
 
@@ -251,7 +299,8 @@ function normalizeDependsOn(dependsOn: string | string[] | undefined): string[] 
 }
 
 /**
- * Resolve service configs with absolute paths and validate dependencies
+ * Resolve service tabs (string or object) to ResolvedProcessConfig
+ * Layout tabs (arrays) are skipped
  */
 export function resolveProcessConfigs(
   config: Config,
@@ -259,7 +308,16 @@ export function resolveProcessConfigs(
 ): ResolvedProcessConfig[] {
   const resolved: ResolvedProcessConfig[] = [];
 
-  for (const [name, processConfig] of Object.entries(config.services)) {
+  if (!config.tabs) return resolved;
+
+  for (const [name, tabConfig] of Object.entries(config.tabs)) {
+    // Skip layout tabs (arrays)
+    if (getTabType(tabConfig) === "layout") continue;
+
+    // Normalize to ProcessConfig
+    const processConfig = normalizeTabToService(name, tabConfig);
+    if (!processConfig) continue;
+
     const resolvedCwd = processConfig.cwd
       ? path.resolve(configDir, processConfig.cwd)
       : configDir;
@@ -339,4 +397,32 @@ export function expandEnvVars(str: string): string {
     const varName = braced || unbraced;
     return process.env[varName] || "";
   });
+}
+
+/**
+ * Deep compare two Tabs configs
+ */
+export function tabsEqual(a: TabsConfig | undefined, b: TabsConfig | undefined): boolean {
+  if (!a && !b) return true;
+  if (!a || !b) return false;
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/**
+ * Get layout tabs from config (tabs that are arrays)
+ */
+export function getLayoutTabs(config: Config): [string, Dashboard][] {
+  if (!config.tabs) return [];
+  return Object.entries(config.tabs)
+    .filter(([, tabConfig]) => getTabType(tabConfig) === "layout")
+    .map(([name, tabConfig]) => [name, tabConfig as Dashboard]);
+}
+
+/**
+ * Get service tabs from config (tabs that are string or object with command)
+ */
+export function getServiceTabs(config: Config): [string, TabConfig][] {
+  if (!config.tabs) return [];
+  return Object.entries(config.tabs)
+    .filter(([, tabConfig]) => getTabType(tabConfig) === "service");
 }

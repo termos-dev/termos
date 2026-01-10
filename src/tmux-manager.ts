@@ -1,16 +1,130 @@
-import { execFile, spawn } from "child_process";
+import { execFile, execFileSync, spawn } from "child_process";
 import { promisify } from "util";
-import { Layout, SimpleLayout, GroupedLayout, LAYOUT_TO_TMUX, isGroupedLayout, getGroupEntries } from "./config.js";
+import * as fs from "fs";
+import * as path from "path";
+import {
+  Dashboard,
+  normalizeDashboardPane,
+  normalizeDashboardToRows,
+  isDashboardNested,
+  TabsConfig,
+  getTabType,
+  normalizeTabToService,
+} from "./config.js";
 
 const execFileAsync = promisify(execFile);
 
-// Position info for a process in a grouped layout
-export interface GroupPosition {
-  groupName: string;
-  posInGroup: number;
+/**
+ * Get the log directory for a session
+ * sessionName already has "mide-" prefix from TmuxManager
+ */
+export function getSessionLogDir(sessionName: string): string {
+  return `/tmp/${sessionName}`;
 }
 
-export type TerminalApp = "auto" | "tmux" | "ghostty" | "iterm" | "kitty" | "terminal";
+/**
+ * Get the log file path for a service
+ */
+export function getServiceLogPath(sessionName: string, serviceName: string): string {
+  return path.join(getSessionLogDir(sessionName), `${serviceName}.log`);
+}
+
+/**
+ * Get the events file path for a session
+ */
+export function getEventsFilePath(sessionName: string): string {
+  return path.join(getSessionLogDir(sessionName), "events.jsonl");
+}
+
+/**
+ * Get the owner file path for a session
+ */
+function getOwnerFilePath(sessionName: string): string {
+  return path.join(getSessionLogDir(sessionName), ".owner");
+}
+
+/**
+ * Write owner PID to session directory
+ */
+function writeOwnerPid(sessionName: string): void {
+  const ownerFile = getOwnerFilePath(sessionName);
+  try {
+    fs.writeFileSync(ownerFile, String(process.pid));
+  } catch {
+    // Ignore - directory might not exist yet
+  }
+}
+
+/**
+ * Read owner PID from session directory
+ */
+function readOwnerPid(sessionName: string): number | null {
+  const ownerFile = getOwnerFilePath(sessionName);
+  try {
+    if (fs.existsSync(ownerFile)) {
+      const content = fs.readFileSync(ownerFile, "utf-8").trim();
+      const pid = parseInt(content, 10);
+      return isNaN(pid) ? null : pid;
+    }
+  } catch {
+    // Ignore
+  }
+  return null;
+}
+
+/**
+ * Check if a process with the given PID is running
+ */
+function isPidRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Check if an existing session is stale (owner process is dead)
+ */
+export function isSessionStale(sessionName: string): boolean {
+  const ownerPid = readOwnerPid(sessionName);
+  if (ownerPid === null) {
+    // No owner file - could be old session, check log directory age
+    const logDir = getSessionLogDir(sessionName);
+    try {
+      if (fs.existsSync(logDir)) {
+        const stats = fs.statSync(logDir);
+        const ageMs = Date.now() - stats.mtimeMs;
+        // Consider sessions older than 5 minutes without owner file as stale
+        return ageMs > 5 * 60 * 1000;
+      }
+    } catch {
+      // Ignore
+    }
+    return false;
+  }
+  // Session is stale if owner PID is not running
+  return !isPidRunning(ownerPid);
+}
+
+/**
+ * Clean up a stale session (kill tmux session and remove logs)
+ */
+export async function cleanupStaleSession(sessionName: string): Promise<void> {
+  console.error(`[mide] Cleaning up stale session: ${sessionName}`);
+  try {
+    await execFileAsync("tmux", ["kill-session", "-t", sessionName]);
+  } catch {
+    // Session may already be gone
+  }
+  const logDir = getSessionLogDir(sessionName);
+  try {
+    fs.rmSync(logDir, { recursive: true, force: true });
+  } catch {
+    // Ignore cleanup errors
+  }
+}
 
 export type IdeStatus = "pending" | "running" | "completed" | "failed";
 
@@ -28,19 +142,6 @@ export function isInsideTmux(): boolean {
   return !!process.env.TMUX;
 }
 
-/**
- * Detect the user's terminal application from environment
- * Note: Warp doesn't support running commands, so we skip it and use Terminal.app
- */
-export function detectTerminal(): Exclude<TerminalApp, "auto" | "tmux" | "warp"> {
-  const termProgram = process.env.TERM_PROGRAM;
-  if (termProgram === "ghostty") return "ghostty";
-  if (termProgram === "iTerm.app") return "iterm";
-  if (termProgram === "kitty") return "kitty";
-  // Warp doesn't support running commands, fall back to Terminal.app
-  return "terminal";
-}
-
 export interface PaneInfo {
   paneId: string;
   panePid: number;
@@ -50,7 +151,6 @@ export interface PaneInfo {
 
 export interface TmuxManagerOptions {
   sessionPrefix?: string;
-  layout?: Layout;
 }
 
 /**
@@ -68,13 +168,29 @@ export async function isTmuxAvailable(): Promise<boolean> {
 /**
  * Get all active IDE tmux sessions
  */
-export async function listIdeSessions(prefix = "mide"): Promise<Array<{ name: string; windows: number; created: Date }>> {
+export async function listIdeSessions(prefix = "mide"): Promise<Array<{ name: string; windows: number; created: Date; clients: number; ownerPid: number | null; isStale: boolean }>> {
   try {
+    // Get sessions
     const { stdout } = await execFileAsync("tmux", [
       "list-sessions",
       "-F",
       "#{session_name}:#{session_windows}:#{session_created}",
     ]);
+
+    // Get client counts per session
+    let clientCounts: Map<string, number> = new Map();
+    try {
+      const { stdout: clientsOut } = await execFileAsync("tmux", [
+        "list-clients",
+        "-F",
+        "#{client_session}",
+      ]);
+      for (const sessionName of clientsOut.trim().split("\n").filter(Boolean)) {
+        clientCounts.set(sessionName, (clientCounts.get(sessionName) || 0) + 1);
+      }
+    } catch {
+      // No clients or error - counts stay at 0
+    }
 
     return stdout
       .trim()
@@ -82,10 +198,14 @@ export async function listIdeSessions(prefix = "mide"): Promise<Array<{ name: st
       .filter((line) => line.startsWith(prefix))
       .map((line) => {
         const [name, windows, created] = line.split(":");
+        const ownerPid = readOwnerPid(name);
         return {
           name,
           windows: parseInt(windows, 10),
           created: new Date(parseInt(created, 10) * 1000),
+          clients: clientCounts.get(name) || 0,
+          ownerPid,
+          isStale: isSessionStale(name),
         };
       });
   } catch {
@@ -164,15 +284,72 @@ export class EmbeddedTmuxManager {
   }
 
   /**
-   * Create a new pane with split in the current window
-   * Uses tiled layout to distribute panes evenly
+   * Get the dimensions of the source pane (where Claude is running)
+   * Used for smart "auto" direction detection
    */
-  async createPane(name: string, command: string, cwd: string, _env?: Record<string, string>): Promise<string> {
+  private async getPaneDimensions(): Promise<{ width: number; height: number }> {
+    const target = this.sourcePaneId || "";
+    const args = target
+      ? ["display-message", "-t", target, "-p", "#{pane_width} #{pane_height}"]
+      : ["display-message", "-p", "#{pane_width} #{pane_height}"];
+
+    const { stdout } = await execFileAsync("tmux", args);
+    const [widthStr, heightStr] = stdout.trim().split(" ");
+    return {
+      width: parseInt(widthStr, 10) || 80,
+      height: parseInt(heightStr, 10) || 24,
+    };
+  }
+
+  /**
+   * Create a new pane with split in the current window
+   * @param name - Unique name for the pane
+   * @param command - Command to run in the pane
+   * @param cwd - Working directory
+   * @param env - Environment variables to set
+   * @param options - Split options: direction ('auto' | 'right' | 'left' | 'top' | 'bottom'), skipRebalance
+   */
+  async createPane(
+    name: string,
+    command: string,
+    cwd: string,
+    env?: Record<string, string>,
+    options?: { direction?: "auto" | "right" | "left" | "top" | "bottom"; skipRebalance?: boolean }
+  ): Promise<string> {
     if (this.paneMap.has(name)) {
       throw new Error(`Pane "${name}" already exists`);
     }
 
-    const shellCommand = `cd ${this.shellEscape(cwd)} && ${command}`;
+    // Resolve "auto" direction based on pane dimensions
+    let direction: "right" | "left" | "top" | "bottom" = "right";
+    const requestedDirection = options?.direction ?? "auto";
+
+    if (requestedDirection === "auto") {
+      // Smart detection: split along the longer axis
+      const { width, height } = await this.getPaneDimensions();
+      direction = width >= height ? "right" : "bottom";
+      console.error(`[mide] Auto-detected split direction: ${direction} (pane: ${width}x${height})`);
+    } else {
+      direction = requestedDirection;
+    }
+    const skipRebalance = options?.skipRebalance ?? false;
+
+    // Build environment exports for custom vars
+    let envExports = "";
+    if (env) {
+      const customVars: string[] = [];
+      for (const [key, value] of Object.entries(env)) {
+        // Only export custom vars not already in system env
+        if (!process.env[key]) {
+          customVars.push(`export ${key}=${this.shellEscape(value)}`);
+        }
+      }
+      if (customVars.length > 0) {
+        envExports = customVars.join("; ") + "; ";
+      }
+    }
+
+    const shellCommand = `cd ${this.shellEscape(cwd)} && ${envExports}${command}`;
 
     // Build split-window args
     const args = ["split-window"];
@@ -182,8 +359,25 @@ export class EmbeddedTmuxManager {
       args.push("-t", this.sourcePaneId);
     }
 
+    // Direction flags:
+    // -h = horizontal split, -v = vertical split
+    // -b = before (left/top instead of right/bottom)
+    switch (direction) {
+      case "right":
+        args.push("-h");
+        break;
+      case "left":
+        args.push("-h", "-b");
+        break;
+      case "bottom":
+        args.push("-v");
+        break;
+      case "top":
+        args.push("-v", "-b");
+        break;
+    }
+
     args.push(
-      "-h",           // Horizontal split (side by side)
       "-P",           // Print pane info
       "-F", "#{pane_id}",
       "-c", cwd,
@@ -194,16 +388,17 @@ export class EmbeddedTmuxManager {
     const paneId = stdout.trim();
     this.paneMap.set(name, paneId);
 
-    // Re-balance layout so all panes are evenly distributed
-    // Target by pane ID to ensure we get the right window
-    try {
-      if (this.sourcePaneId) {
-        await execFileAsync("tmux", ["select-layout", "-t", this.sourcePaneId, "tiled"]);
-      } else {
-        await execFileAsync("tmux", ["select-layout", "tiled"]);
+    // Re-balance layout so all panes are evenly distributed (unless skipped)
+    if (!skipRebalance) {
+      try {
+        if (this.sourcePaneId) {
+          await execFileAsync("tmux", ["select-layout", "-t", this.sourcePaneId, "tiled"]);
+        } else {
+          await execFileAsync("tmux", ["select-layout", "tiled"]);
+        }
+      } catch {
+        // Layout change might fail, that's ok
       }
-    } catch {
-      // Layout change might fail, that's ok
     }
 
     console.error(`[mide] Created embedded pane: ${name} (${paneId})`);
@@ -290,6 +485,14 @@ export class EmbeddedTmuxManager {
   }
 
   /**
+   * Send keys to a pane
+   */
+  async sendKeys(paneIdOrName: string, keys: string): Promise<void> {
+    const paneId = this.paneMap.get(paneIdOrName) ?? paneIdOrName;
+    await execFileAsync("tmux", ["send-keys", "-t", paneId, keys, "Enter"]);
+  }
+
+  /**
    * Stop all panes
    */
   async stopAll(): Promise<void> {
@@ -308,64 +511,39 @@ export class EmbeddedTmuxManager {
  */
 export class TmuxManager {
   readonly sessionName: string;
-  private layout: Layout;
   private paneMap = new Map<string, string>(); // processName -> paneId
-  // For grouped layouts: track first pane of each group for splitting (keyed by group name)
-  private groupFirstPanes = new Map<string, string>();
-  // Track group order for determining "previous group"
-  private groupOrder: string[] = [];
 
   constructor(projectName: string, options: TmuxManagerOptions = {}) {
     const prefix = options.sessionPrefix ?? "mide";
     this.sessionName = `${prefix}-${this.sanitizeName(projectName)}`;
-    this.layout = options.layout ?? "grid";
-
-    // Initialize group order from layout
-    if (isGroupedLayout(this.layout)) {
-      this.groupOrder = Object.keys(this.layout.groups);
-    }
   }
 
   /**
-   * Get the group name and position for a process in grouped layout
-   * Returns { groupName, posInGroup } or null if not found
+   * Register a pane in the pane map
    */
-  private getGroupPosition(processName: string): GroupPosition | null {
-    if (!isGroupedLayout(this.layout)) return null;
-
-    for (const [groupName, processes] of Object.entries(this.layout.groups)) {
-      const posIdx = processes.indexOf(processName);
-      if (posIdx !== -1) {
-        return { groupName, posInGroup: posIdx };
-      }
-    }
-    return null;
+  registerPane(name: string, paneId: string): void {
+    this.paneMap.set(name, paneId);
   }
 
   /**
-   * Get the previous group name in order
+   * Unregister a pane from the pane map
    */
-  private getPreviousGroupName(groupName: string): string | null {
-    const idx = this.groupOrder.indexOf(groupName);
-    if (idx <= 0) return null;
-    return this.groupOrder[idx - 1];
+  unregisterPane(name: string): void {
+    this.paneMap.delete(name);
   }
 
   /**
-   * Get available group names
+   * Get pane ID by name
    */
-  getGroupNames(): string[] {
-    if (!isGroupedLayout(this.layout)) return [];
-    return [...this.groupOrder];
+  getPaneId(name: string): string | undefined {
+    return this.paneMap.get(name);
   }
 
   /**
-   * Add a dynamic group (for dynamic terminals when no grouped layout)
+   * Check if a pane exists
    */
-  addDynamicGroup(groupName: string): void {
-    if (!this.groupOrder.includes(groupName)) {
-      this.groupOrder.push(groupName);
-    }
+  hasPane(name: string): boolean {
+    return this.paneMap.has(name);
   }
 
   /**
@@ -388,10 +566,121 @@ export class TmuxManager {
   }
 
   /**
+   * Get paneId for an existing window by name
+   * Returns undefined if window doesn't exist
+   */
+  async getWindowPaneId(windowName: string): Promise<string | undefined> {
+    try {
+      const { stdout } = await execFileAsync("tmux", [
+        "list-windows", "-t", this.sessionName, "-F", "#{window_name}:#{pane_id}"
+      ]);
+      const lines = stdout.trim().split("\n");
+      for (const line of lines) {
+        const [name, paneId] = line.split(":");
+        if (name === windowName) {
+          // Update pane map
+          this.paneMap.set(windowName, paneId);
+          return paneId;
+        }
+      }
+      return undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Discover and populate paneIds for all windows in the session
+   * Returns map of windowName -> paneId
+   */
+  async discoverWindows(): Promise<Map<string, string>> {
+    const result = new Map<string, string>();
+    try {
+      const { stdout } = await execFileAsync("tmux", [
+        "list-windows", "-t", this.sessionName, "-F", "#{window_name}:#{pane_id}"
+      ]);
+      const lines = stdout.trim().split("\n");
+      for (const line of lines) {
+        const [name, paneId] = line.split(":");
+        if (name && paneId) {
+          result.set(name, paneId);
+          this.paneMap.set(name, paneId);
+        }
+      }
+    } catch {
+      // Session may not exist
+    }
+    return result;
+  }
+
+  /**
+   * Discover window indices for all windows in the session
+   * Returns map of windowName -> windowIndex
+   */
+  async discoverWindowIndices(): Promise<Map<string, number>> {
+    const result = new Map<string, number>();
+    try {
+      const { stdout } = await execFileAsync("tmux", [
+        "list-windows", "-t", this.sessionName, "-F", "#{window_name}:#{window_index}"
+      ]);
+      const lines = stdout.trim().split("\n");
+      for (const line of lines) {
+        const [name, indexStr] = line.split(":");
+        if (name && indexStr) {
+          result.set(name, parseInt(indexStr, 10));
+        }
+      }
+    } catch {
+      // Session may not exist
+    }
+    return result;
+  }
+
+  /**
+   * Discover panes in window 0 (Canvas) by their titles
+   * Returns map of paneTitle -> paneId
+   */
+  async discoverCanvasPanes(): Promise<Map<string, string>> {
+    const result = new Map<string, string>();
+    try {
+      const { stdout } = await execFileAsync("tmux", [
+        "list-panes", "-t", `${this.sessionName}:0`, "-F", "#{pane_title}:#{pane_id}"
+      ]);
+      const lines = stdout.trim().split("\n");
+      for (const line of lines) {
+        const colonIdx = line.lastIndexOf(":");
+        if (colonIdx > 0) {
+          const title = line.substring(0, colonIdx);
+          const paneId = line.substring(colonIdx + 1);
+          // Skip default titles (hostname, empty, etc)
+          if (title && paneId && !title.includes(".") && title !== "zsh" && title !== "bash") {
+            result.set(title, paneId);
+            this.paneMap.set(title, paneId);
+          }
+        }
+      }
+    } catch {
+      // Window may not exist
+    }
+    return result;
+  }
+
+  /**
    * Create a new tmux session (detached)
    * Returns the final session name (may have suffix if collision)
    */
   async createSession(): Promise<string> {
+    // Check for stale sessions from previous crashes and clean them up
+    try {
+      await execFileAsync("tmux", ["has-session", "-t", this.sessionName]);
+      // Session exists - check if it's stale (owner process is dead)
+      if (isSessionStale(this.sessionName)) {
+        await cleanupStaleSession(this.sessionName);
+      }
+    } catch {
+      // Session doesn't exist, continue
+    }
+
     // Check if our exact session already exists and is recent (within 30 seconds)
     // This handles the case where Claude Code might start the MCP server twice
     try {
@@ -403,6 +692,8 @@ export class TmuxManager {
       if (ageMs < 30000) {
         // Session exists and is recent, reuse it
         console.error(`[mide] Reusing existing session: ${this.sessionName} (created ${Math.round(ageMs / 1000)}s ago)`);
+        // Update owner PID to current process
+        writeOwnerPid(this.sessionName);
         return this.sessionName;
       }
     } catch {
@@ -432,7 +723,7 @@ export class TmuxManager {
       "-s",
       finalName,
       "-n",
-      "ide",
+      "mide",
       // Keep pane alive after command exits to capture exit status
       "-x", "200", // Set initial width
       "-y", "50",  // Set initial height
@@ -458,6 +749,17 @@ export class TmuxManager {
       (this as { sessionName: string }).sessionName = finalName;
     }
 
+    // Create log directory for this session
+    const logDir = getSessionLogDir(finalName);
+    fs.mkdirSync(logDir, { recursive: true });
+
+    // Initialize empty events file
+    const eventsFile = getEventsFilePath(finalName);
+    fs.writeFileSync(eventsFile, "", { flag: "w" });
+
+    // Write owner PID for stale session detection
+    writeOwnerPid(finalName);
+
     return finalName;
   }
 
@@ -471,13 +773,309 @@ export class TmuxManager {
       // Session may already be gone
     }
     this.paneMap.clear();
+
+    // Clean up log directory
+    const logDir = getSessionLogDir(this.sessionName);
+    try {
+      fs.rmSync(logDir, { recursive: true, force: true });
+    } catch {
+      // Ignore cleanup errors
+    }
+  }
+
+  /**
+   * Create a new window (tab) for a service
+   * Services run in separate windows for better organization
+   * Output is piped to log file for persistence
+   * Returns the pane ID of the new window
+   */
+  async createServiceWindow(
+    serviceName: string,
+    command: string,
+    cwd: string,
+    env?: Record<string, string>
+  ): Promise<string> {
+    // Build environment exports
+    let envExports = "";
+    if (env) {
+      const customVars: string[] = [];
+      for (const [key, value] of Object.entries(env)) {
+        if (key === "PORT" || !process.env[key]) {
+          customVars.push(`export ${key}=${this.shellEscape(value)}`);
+        }
+      }
+      if (customVars.length > 0) {
+        envExports = customVars.join("; ") + "; ";
+      }
+    }
+
+    const shellCommand = `cd ${this.shellEscape(cwd)} && ${envExports}${command}`;
+
+    // Create new window for this service
+    const { stdout } = await execFileAsync("tmux", [
+      "new-window",
+      "-t", this.sessionName,
+      "-n", serviceName,       // Window name = service name
+      "-P",                    // Print window info
+      "-F", "#{pane_id}",      // Return pane ID
+      "-c", cwd,
+      "sh", "-c", shellCommand,
+    ]);
+    const paneId = stdout.trim();
+
+    // Set remain-on-exit so pane stays visible after process exits (for crash logs)
+    try {
+      await execFileAsync("tmux", [
+        "set-option",
+        "-t", paneId,
+        "remain-on-exit", "on",
+      ]);
+    } catch {
+      // Ignore - option might already be set
+    }
+
+    // Set up pipe-pane to redirect output to log file
+    const logFile = getServiceLogPath(this.sessionName, serviceName);
+    try {
+      await execFileAsync("tmux", [
+        "pipe-pane",
+        "-t", paneId,
+        "-o",                  // Append mode
+        `cat >> ${this.shellEscape(logFile)}`,
+      ]);
+    } catch (err) {
+      console.error(`[mide] Warning: Failed to set up pipe-pane for ${serviceName}: ${err}`);
+    }
+
+    this.paneMap.set(serviceName, paneId);
+    return paneId;
+  }
+
+  /**
+   * Create a new window with a multi-pane layout (for layout tabs)
+   * Returns the window index
+   */
+  async createLayoutTab(
+    tabName: string,
+    layout: Dashboard,
+    cwd: string
+  ): Promise<number> {
+    if (layout.length === 0) {
+      throw new Error(`Layout tab "${tabName}" has no panes defined`);
+    }
+
+    const isNested = isDashboardNested(layout);
+    const rows = normalizeDashboardToRows(layout);
+
+    // Get first pane info
+    const firstRow = rows[0];
+    const firstPane = normalizeDashboardPane(firstRow[0]);
+
+    // Create new window with first pane
+    const { stdout: windowOut } = await execFileAsync("tmux", [
+      "new-window",
+      "-t", this.sessionName,
+      "-n", tabName,
+      "-P",
+      "-F", "#{window_index}:#{pane_id}",
+      "-c", cwd,
+      "sh", "-c", `cd ${this.shellEscape(cwd)} && ${firstPane.command}`,
+    ]);
+    const [windowIndexStr, initialPaneId] = windowOut.trim().split(":");
+    const windowIndex = parseInt(windowIndexStr, 10);
+
+    // Register first pane
+    this.paneMap.set(`${tabName}:${firstPane.name}`, initialPaneId);
+
+    // Track pane IDs for layout application
+    const paneIds: string[] = [initialPaneId];
+
+    if (isNested) {
+      // Nested layout: create rows of columns
+      const rowFirstPanes: string[] = [initialPaneId];
+
+      // Create additional rows (split from initial pane vertically)
+      for (let rowIdx = 1; rowIdx < rows.length; rowIdx++) {
+        const row = rows[rowIdx];
+        const firstPaneInRow = normalizeDashboardPane(row[0]);
+
+        const { stdout } = await execFileAsync("tmux", [
+          "split-window",
+          "-t", initialPaneId,
+          "-v",
+          "-P",
+          "-F", "#{pane_id}",
+          "-c", cwd,
+          "sh", "-c", `cd ${this.shellEscape(cwd)} && ${firstPaneInRow.command}`,
+        ]);
+        const newPaneId = stdout.trim();
+        this.paneMap.set(`${tabName}:${firstPaneInRow.name}`, newPaneId);
+        paneIds.push(newPaneId);
+        rowFirstPanes.push(newPaneId);
+      }
+
+      // Create columns within each row
+      for (let rowIdx = 0; rowIdx < rows.length; rowIdx++) {
+        const row = rows[rowIdx];
+        const rowPaneId = rowFirstPanes[rowIdx];
+
+        for (let colIdx = 1; colIdx < row.length; colIdx++) {
+          const pane = normalizeDashboardPane(row[colIdx]);
+
+          const { stdout } = await execFileAsync("tmux", [
+            "split-window",
+            "-t", rowPaneId,
+            "-h",
+            "-P",
+            "-F", "#{pane_id}",
+            "-c", cwd,
+            "sh", "-c", `cd ${this.shellEscape(cwd)} && ${pane.command}`,
+          ]);
+          const newPaneId = stdout.trim();
+          this.paneMap.set(`${tabName}:${pane.name}`, newPaneId);
+          paneIds.push(newPaneId);
+        }
+      }
+
+      // Balance layout within each row
+      for (const rowPaneId of rowFirstPanes) {
+        try {
+          await execFileAsync("tmux", [
+            "select-layout", "-t", rowPaneId, "even-horizontal",
+          ]);
+        } catch {
+          // Ignore - might be single pane row
+        }
+      }
+    } else {
+      // Flat layout: create panes and apply tiled
+      const flatPanes = rows[0];
+
+      for (let i = 1; i < flatPanes.length; i++) {
+        const pane = normalizeDashboardPane(flatPanes[i]);
+
+        const { stdout } = await execFileAsync("tmux", [
+          "split-window",
+          "-t", `${this.sessionName}:${windowIndex}`,
+          "-h",
+          "-P",
+          "-F", "#{pane_id}",
+          "-c", cwd,
+          "sh", "-c", `cd ${this.shellEscape(cwd)} && ${pane.command}`,
+        ]);
+        const newPaneId = stdout.trim();
+        this.paneMap.set(`${tabName}:${pane.name}`, newPaneId);
+        paneIds.push(newPaneId);
+      }
+
+      // Apply tiled layout for even distribution
+      try {
+        await execFileAsync("tmux", [
+          "select-layout", "-t", `${this.sessionName}:${windowIndex}`, "tiled",
+        ]);
+      } catch {
+        // Ignore - might be single pane
+      }
+    }
+
+    return windowIndex;
+  }
+
+  /**
+   * Create all tabs from config
+   * Returns map of tab name to window index
+   */
+  async createAllTabs(
+    tabs: TabsConfig,
+    cwd: string,
+    onServiceCreated?: (name: string, paneId: string, windowIndex: number) => void
+  ): Promise<Map<string, number>> {
+    const tabIndices = new Map<string, number>();
+
+    for (const [tabName, tabConfig] of Object.entries(tabs)) {
+      const tabType = getTabType(tabConfig);
+
+      if (tabType === "layout") {
+        // Layout tab: create window with multi-pane layout
+        const windowIndex = await this.createLayoutTab(tabName, tabConfig as Dashboard, cwd);
+        tabIndices.set(tabName, windowIndex);
+        console.error(`[mide] Created layout tab "${tabName}" at window ${windowIndex}`);
+      } else {
+        // Service tab: create window with single pane
+        const processConfig = normalizeTabToService(tabName, tabConfig);
+        if (!processConfig) continue;
+
+        const paneId = await this.createServiceWindow(
+          tabName,
+          processConfig.command,
+          processConfig.cwd ? path.resolve(cwd, processConfig.cwd) : cwd,
+          processConfig.env
+        );
+
+        // Get window index for this tab
+        const { stdout } = await execFileAsync("tmux", [
+          "display-message", "-t", paneId, "-p", "#{window_index}",
+        ]);
+        const windowIndex = parseInt(stdout.trim(), 10);
+        tabIndices.set(tabName, windowIndex);
+
+        if (onServiceCreated) {
+          onServiceCreated(tabName, paneId, windowIndex);
+        }
+
+        console.error(`[mide] Created service tab "${tabName}" at window ${windowIndex}`);
+      }
+    }
+
+    return tabIndices;
+  }
+
+  /**
+   * Kill all tab windows (windows 1+), preserving window 0 (mide/welcome)
+   */
+  async killAllTabWindows(): Promise<void> {
+    try {
+      // List all windows except window 0
+      const { stdout } = await execFileAsync("tmux", [
+        "list-windows",
+        "-t", this.sessionName,
+        "-F", "#{window_index}",
+      ]);
+
+      const windowIndices = stdout.trim().split("\n")
+        .map(s => parseInt(s, 10))
+        .filter(idx => !isNaN(idx) && idx > 0) // Skip window 0
+        .sort((a, b) => b - a); // Kill in reverse order to avoid index shifting
+
+      for (const idx of windowIndices) {
+        try {
+          await execFileAsync("tmux", [
+            "kill-window",
+            "-t", `${this.sessionName}:${idx}`,
+          ]);
+        } catch {
+          // Window may already be gone
+        }
+      }
+
+      // Clear pane map entries for killed windows
+      this.paneMap.clear();
+    } catch (err) {
+      console.error(`[mide] Error killing tab windows: ${err}`);
+    }
   }
 
   /**
    * Create a new pane for a process
    * Returns the pane ID
    */
-  async createPane(processName: string, command: string, cwd: string, env?: Record<string, string>): Promise<string> {
+  async createPane(
+    processName: string,
+    command: string,
+    cwd: string,
+    env?: Record<string, string>,
+    _options?: { direction?: "right" | "left" | "top" | "bottom"; skipRebalance?: boolean }
+  ): Promise<string> {
     // Build environment exports for only custom/process-specific vars
     let envExports = "";
     if (env) {
@@ -510,18 +1108,8 @@ export class TmuxManager {
         "-k",  // Kill any existing process
         "sh", "-c", shellCommand,
       ]);
-      // Track as first pane of first group for grouped layouts
-      if (isGroupedLayout(this.layout)) {
-        const firstGroupName = this.groupOrder[0];
-        if (firstGroupName) {
-          this.groupFirstPanes.set(firstGroupName, paneId);
-        }
-      }
-    } else if (isGroupedLayout(this.layout)) {
-      // Grouped layout: split strategically based on group position
-      paneId = await this.createPaneForGroup(processName, shellCommand, cwd);
     } else {
-      // Simple layout: split and rebalance
+      // Split and rebalance
       const { stdout } = await execFileAsync("tmux", [
         "split-window",
         "-t",
@@ -534,7 +1122,7 @@ export class TmuxManager {
       ]);
       paneId = stdout.trim();
 
-      // Rebalance with simple layout
+      // Rebalance with tiled layout
       await this.applyLayout();
     }
 
@@ -543,126 +1131,14 @@ export class TmuxManager {
   }
 
   /**
-   * Create a pane for grouped layout, splitting strategically
-   */
-  private async createPaneForGroup(processName: string, shellCommand: string, cwd: string, groupNameOverride?: string): Promise<string> {
-    if (!isGroupedLayout(this.layout) && !groupNameOverride) {
-      throw new Error("createPaneForGroup called without grouped layout");
-    }
-
-    const position = this.getGroupPosition(processName);
-    const groupName = groupNameOverride ?? position?.groupName;
-    const posInGroup = position?.posInGroup ?? -1; // -1 means append to end
-
-    if (!groupName) {
-      // Process not in any group, just append with default split
-      const { stdout } = await execFileAsync("tmux", [
-        "split-window",
-        "-t",
-        this.sessionName,
-        "-P",
-        "-F",
-        "#{pane_id}",
-        "-c", cwd,
-        "sh", "-c", shellCommand,
-      ]);
-      return stdout.trim();
-    }
-
-    const isRows = isGroupedLayout(this.layout) ? this.layout.type === "rows" : true;
-
-    // Determine split direction:
-    // - rows: groups are stacked vertically, items in group are horizontal
-    // - columns: groups are side by side, items in group are vertical
-    const groupSplitFlag = isRows ? "-v" : "-h";  // Split to create new group
-    const itemSplitFlag = isRows ? "-h" : "-v";   // Split within group
-
-    let targetPane: string;
-    let splitFlag: string;
-
-    const isFirstInGroup = posInGroup === 0 || !this.groupFirstPanes.has(groupName);
-    const isFirstGroup = this.groupOrder.indexOf(groupName) === 0;
-
-    if (isFirstInGroup) {
-      // First item in this group
-      if (isFirstGroup) {
-        // First group, first item - this shouldn't happen (handled by respawn above)
-        // But just in case, split from session
-        targetPane = this.sessionName;
-        splitFlag = itemSplitFlag;
-      } else {
-        // New group - split from first pane of previous group
-        const prevGroupName = this.getPreviousGroupName(groupName);
-        const prevGroupFirstPane = prevGroupName ? this.groupFirstPanes.get(prevGroupName) : null;
-        if (!prevGroupFirstPane) {
-          // Fallback: split from session
-          targetPane = this.sessionName;
-          splitFlag = groupSplitFlag;
-        } else {
-          targetPane = prevGroupFirstPane;
-          splitFlag = groupSplitFlag;
-        }
-      }
-    } else {
-      // Not first in group - split from previous item in same group (or last item if appending)
-      let prevPane: string | undefined;
-
-      if (isGroupedLayout(this.layout) && posInGroup >= 0) {
-        // Find previous process in this group
-        const groupProcesses = this.layout.groups[groupName];
-        if (groupProcesses && posInGroup > 0) {
-          const prevProcess = groupProcesses[posInGroup - 1];
-          prevPane = this.paneMap.get(prevProcess);
-        }
-      }
-
-      // For dynamic terminals or if prev not found, find last pane in this group
-      if (!prevPane) {
-        // Find any pane in this group to split from
-        const groupFirstPane = this.groupFirstPanes.get(groupName);
-        prevPane = groupFirstPane;
-      }
-
-      if (!prevPane) {
-        // Fallback: split from session
-        targetPane = this.sessionName;
-        splitFlag = itemSplitFlag;
-      } else {
-        targetPane = prevPane;
-        splitFlag = itemSplitFlag;
-      }
-    }
-
-    const { stdout } = await execFileAsync("tmux", [
-      "split-window",
-      splitFlag,
-      "-t",
-      targetPane,
-      "-P",
-      "-F",
-      "#{pane_id}",
-      "-c", cwd,
-      "sh", "-c", shellCommand,
-    ]);
-    const paneId = stdout.trim();
-
-    // Track first pane of each group
-    if (isFirstInGroup) {
-      this.groupFirstPanes.set(groupName, paneId);
-    }
-
-    return paneId;
-  }
-
-  /**
-   * Create a dynamic pane in a specific group
+   * Create a dynamic pane in window 0
    * Used for dynamically created terminals
    */
   async createDynamicPane(
     name: string,
     command: string,
     cwd: string,
-    groupName: string,
+    _groupName: string,
     env?: Record<string, string>
   ): Promise<string> {
     // Build environment exports
@@ -681,27 +1157,24 @@ export class TmuxManager {
 
     const shellCommand = `cd ${this.shellEscape(cwd)} && ${envExports}${command}`;
 
-    // Ensure the group exists in our tracking
-    this.addDynamicGroup(groupName);
+    // Always create dynamic panes in window 0 (mide/dashboard window)
+    // This keeps the architecture simple: services = windows, interactions = panes in window 0
+    const { stdout } = await execFileAsync("tmux", [
+      "split-window",
+      "-t", `${this.sessionName}:0`,  // Target window 0 (mide)
+      "-h",                            // Horizontal split (right side)
+      "-P",
+      "-F", "#{pane_id}",
+      "-c", cwd,
+      "sh", "-c", shellCommand,
+    ]);
+    const paneId = stdout.trim();
 
-    // Check if this is the very first pane
-    const panes = await this.listPanes();
-    let paneId: string;
-
-    if (panes.length === 1 && !this.paneMap.size) {
-      // First pane - respawn
-      paneId = panes[0].paneId;
-      await execFileAsync("tmux", [
-        "respawn-pane",
-        "-t",
-        paneId,
-        "-k",
-        "sh", "-c", shellCommand,
-      ]);
-      this.groupFirstPanes.set(groupName, paneId);
-    } else {
-      // Create pane in the specified group
-      paneId = await this.createPaneForGroup(name, shellCommand, cwd, groupName);
+    // Set pane title for recovery on reconnect
+    try {
+      await execFileAsync("tmux", ["select-pane", "-t", paneId, "-T", name]);
+    } catch {
+      // Non-fatal if title can't be set
     }
 
     this.paneMap.set(name, paneId);
@@ -766,6 +1239,7 @@ export class TmuxManager {
 
   /**
    * List all panes in the session with their status
+   * Uses -s flag to list panes across all windows in the session
    */
   async listPanes(): Promise<PaneInfo[]> {
     try {
@@ -773,6 +1247,7 @@ export class TmuxManager {
         "list-panes",
         "-t",
         this.sessionName,
+        "-s",  // List all panes in session (all windows), not just current window
         "-F",
         "#{pane_id}:#{pane_pid}:#{pane_dead}:#{pane_dead_status}",
       ]);
@@ -815,46 +1290,9 @@ export class TmuxManager {
   }
 
   /**
-   * Apply layout to the session
-   * For simple layouts: uses tmux's built-in layout
-   * For grouped layouts: already handled by strategic splits
+   * Apply tiled layout to the session
    */
-  async applyLayout(layout?: SimpleLayout): Promise<void> {
-    // Skip for grouped layouts - splits handle the arrangement
-    if (isGroupedLayout(this.layout) && !layout) {
-      return;
-    }
-
-    // Determine tmux layout name
-    let tmuxLayout: string;
-    if (layout) {
-      tmuxLayout = LAYOUT_TO_TMUX[layout];
-    } else if (typeof this.layout === "string") {
-      tmuxLayout = LAYOUT_TO_TMUX[this.layout];
-    } else {
-      return; // Grouped layout, skip
-    }
-
-    try {
-      await execFileAsync("tmux", [
-        "select-layout",
-        "-t",
-        this.sessionName,
-        tmuxLayout,
-      ]);
-    } catch {
-      // Layout may fail if only one pane
-    }
-  }
-
-  /**
-   * Finalize grouped layout after all panes are created
-   * Evenly distributes space between groups and within groups
-   */
-  async finalizeGroupedLayout(): Promise<void> {
-    if (!isGroupedLayout(this.layout)) return;
-
-    // Use tiled to evenly distribute, it works well for grid-like arrangements
+  async applyLayout(): Promise<void> {
     try {
       await execFileAsync("tmux", [
         "select-layout",
@@ -863,7 +1301,7 @@ export class TmuxManager {
         "tiled",
       ]);
     } catch {
-      // Ignore errors
+      // Layout may fail if only one pane
     }
   }
 
@@ -901,13 +1339,6 @@ export class TmuxManager {
   }
 
   /**
-   * Get the pane ID for a process
-   */
-  getPaneId(processName: string): string | undefined {
-    return this.paneMap.get(processName);
-  }
-
-  /**
    * Select a pane by name (for CLI attach with specific pane)
    */
   async selectPane(paneName: string): Promise<boolean> {
@@ -934,15 +1365,29 @@ export class TmuxManager {
 
   /**
    * Attach to the session (for CLI use)
+   * Returns a promise that resolves when tmux exits
    */
-  attach(): void {
-    // Use spawn with inherit to give user control
-    const child = spawn("tmux", ["attach", "-t", this.sessionName], {
-      stdio: "inherit",
-    });
+  attach(): Promise<number> {
+    // Select window 0 (dashboard) before attaching
+    try {
+      execFileSync("tmux", ["select-window", "-t", `${this.sessionName}:0`]);
+    } catch {
+      // Ignore - window might not exist yet
+    }
 
-    child.on("exit", (code) => {
-      process.exit(code ?? 0);
+    return new Promise((resolve) => {
+      const child = spawn("tmux", ["attach", "-t", this.sessionName], {
+        stdio: "inherit",
+      });
+
+      child.on("exit", (code) => {
+        resolve(code ?? 0);
+      });
+
+      child.on("error", (err) => {
+        console.error(`[mide] Failed to attach: ${err}`);
+        resolve(1);
+      });
     });
   }
 
@@ -981,187 +1426,206 @@ export class TmuxManager {
     }
   }
 
-  /**
-   * Open a terminal window attached to this tmux session
-   * Supports multiple terminal applications: Ghostty, iTerm2, Kitty, Warp, Terminal.app
-   */
-  async openTerminal(terminalApp?: TerminalApp, cwd?: string): Promise<boolean> {
-    const cmd = `tmux attach -t ${this.sessionName}`;
-    const insideTmux = isInsideTmux();
+  // ==================== Dashboard Methods ====================
 
-    // Check if session already has a client attached (prevent duplicate windows)
+  /**
+   * Get all pane IDs in window 0 (mide/dashboard window)
+   */
+  async getWindow0PaneIds(): Promise<string[]> {
     try {
       const { stdout } = await execFileAsync("tmux", [
-        "list-clients", "-t", this.sessionName, "-F", "#{client_name}"
+        "list-panes",
+        "-t", `${this.sessionName}:0`,
+        "-F", "#{pane_id}",
       ]);
-      if (stdout.trim()) {
-        console.error(`[mide] Terminal already attached to ${this.sessionName}`);
-        return true;
-      }
+      return stdout.trim().split("\n").filter(Boolean);
     } catch {
-      // No clients or session doesn't exist, continue
+      return [];
+    }
+  }
+
+  /**
+   * Check if window 0 has only one pane (welcome component or initial pane)
+   */
+  async isOnlyWelcomePane(): Promise<boolean> {
+    const panes = await this.getWindow0PaneIds();
+    return panes.length === 1;
+  }
+
+  /**
+   * Get the initial pane ID from window 0
+   */
+  async getWindow0InitialPaneId(): Promise<string | null> {
+    const panes = await this.getWindow0PaneIds();
+    return panes[0] || null;
+  }
+
+  /**
+   * Create dashboard layout in window 0
+   *
+   * For flat arrays [a, b, c, d]: creates panes and applies tiled layout
+   * For nested arrays [[a, b], [c, d]]: creates rows of columns
+   *
+   * @param dashboard - Dashboard configuration from mide.yaml
+   * @param cwd - Working directory for commands
+   */
+  async createDashboardLayout(dashboard: Dashboard, cwd: string): Promise<void> {
+    if (dashboard.length === 0) return;
+
+    const isNested = isDashboardNested(dashboard);
+    const rows = normalizeDashboardToRows(dashboard);
+
+    // Track pane IDs for layout application
+    const paneIds: string[] = [];
+
+    // Get the initial pane ID (window 0 starts with one pane)
+    const initialPaneId = await this.getWindow0InitialPaneId();
+    if (!initialPaneId) {
+      console.error("[mide] No initial pane found in window 0");
+      return;
     }
 
-    // Handle explicit "tmux" setting
-    if (terminalApp === "tmux") {
-      if (insideTmux) {
-        return this.openInTmuxWindow(cmd);
-      } else {
-        console.error(`[mide] Not inside tmux. Attach with: ${cmd}`);
-        return false;
+    // First pane: respawn the initial pane with first command
+    const firstRow = rows[0];
+    const firstPane = normalizeDashboardPane(firstRow[0]);
+
+    // Register in paneMap first so respawnPane can find it
+    this.paneMap.set(firstPane.name, initialPaneId);
+    await this.respawnPane(firstPane.name, firstPane.command, cwd);
+    paneIds.push(initialPaneId);
+
+    if (isNested) {
+      // Nested layout: create rows of columns
+      // Algorithm:
+      // 1. Start with initial pane (row 0, col 0)
+      // 2. Split vertically for each additional row
+      // 3. For each row, split horizontally for additional columns
+
+      // Store row pane IDs (first pane of each row)
+      const rowFirstPanes: string[] = [initialPaneId];
+
+      // Create additional rows (split from initial pane vertically)
+      for (let rowIdx = 1; rowIdx < rows.length; rowIdx++) {
+        const row = rows[rowIdx];
+        const firstPaneInRow = normalizeDashboardPane(row[0]);
+
+        const { stdout } = await execFileAsync("tmux", [
+          "split-window",
+          "-t", initialPaneId,
+          "-v",  // Vertical split (creates row below)
+          "-P",
+          "-F", "#{pane_id}",
+          "-c", cwd,
+          "sh", "-c", `cd ${this.shellEscape(cwd)} && ${firstPaneInRow.command}`,
+        ]);
+        const newPaneId = stdout.trim();
+        this.paneMap.set(firstPaneInRow.name, newPaneId);
+        paneIds.push(newPaneId);
+        rowFirstPanes.push(newPaneId);
       }
-    }
 
-    // Handle "auto" - detect tmux first, then fall through to external terminal
-    if (terminalApp === "auto" || !terminalApp) {
-      if (insideTmux) {
-        console.error("[mide] Detected tmux environment, creating window");
-        return this.openInTmuxWindow(cmd);
+      // Now create columns within each row
+      for (let rowIdx = 0; rowIdx < rows.length; rowIdx++) {
+        const row = rows[rowIdx];
+        const rowPaneId = rowFirstPanes[rowIdx];
+
+        // Skip first pane in row (already created)
+        for (let colIdx = 1; colIdx < row.length; colIdx++) {
+          const pane = normalizeDashboardPane(row[colIdx]);
+
+          const { stdout } = await execFileAsync("tmux", [
+            "split-window",
+            "-t", rowPaneId,
+            "-h",  // Horizontal split (creates column to the right)
+            "-P",
+            "-F", "#{pane_id}",
+            "-c", cwd,
+            "sh", "-c", `cd ${this.shellEscape(cwd)} && ${pane.command}`,
+          ]);
+          const newPaneId = stdout.trim();
+          this.paneMap.set(pane.name, newPaneId);
+          paneIds.push(newPaneId);
+        }
       }
-      // Fall through to external terminal detection below
-    }
 
-    // External terminals only supported on macOS
-    if (process.platform !== "darwin") {
-      console.error(`[mide] Auto-attach only supported on macOS. Run: ${cmd}`);
-      return false;
-    }
+      // Balance the layout within each row
+      for (const rowPaneId of rowFirstPanes) {
+        try {
+          await execFileAsync("tmux", [
+            "select-layout", "-t", rowPaneId, "even-horizontal",
+          ]);
+        } catch {
+          // Ignore - might be single pane row
+        }
+      }
+    } else {
+      // Flat layout: create panes and apply tiled
+      const flatPanes = rows[0]; // Single row contains all panes
 
-    const terminal = terminalApp === "auto" || !terminalApp ? detectTerminal() : terminalApp;
-    console.error(`[mide] Opening terminal: ${terminal}`);
+      for (let i = 1; i < flatPanes.length; i++) {
+        const pane = normalizeDashboardPane(flatPanes[i]);
 
-    switch (terminal) {
-      case "ghostty":
-        return this.openInGhostty(cmd);
-      case "iterm":
-        return this.openInITerm(cmd);
-      case "kitty":
-        return this.openInKitty(cmd);
-      default:
-        return this.openInTerminalApp(cmd);
-    }
-  }
+        const { stdout } = await execFileAsync("tmux", [
+          "split-window",
+          "-t", `${this.sessionName}:0`,
+          "-h",
+          "-P",
+          "-F", "#{pane_id}",
+          "-c", cwd,
+          "sh", "-c", `cd ${this.shellEscape(cwd)} && ${pane.command}`,
+        ]);
+        const newPaneId = stdout.trim();
+        this.paneMap.set(pane.name, newPaneId);
+        paneIds.push(newPaneId);
+      }
 
-  /**
-   * Open MIDE session in a new window of the current tmux session
-   * Only works when already inside tmux
-   */
-  private async openInTmuxWindow(attachCmd: string): Promise<boolean> {
-    if (!process.env.TMUX) {
-      console.error("[mide] Not inside tmux, cannot create window");
-      return false;
-    }
-
-    try {
-      // Create new window in current session that runs the attach command
-      await execFileAsync("tmux", [
-        "new-window",
-        "-n", "mide",  // Window name
-        attachCmd,     // Command: "tmux attach -t mide-xxx"
-      ]);
-      console.error(`[mide] Created tmux window attached to ${this.sessionName}`);
-      return true;
-    } catch (err) {
-      console.error("[mide] Failed to create tmux window:", err);
-      return false;
-    }
-  }
-
-  /**
-   * Open Ghostty with command
-   */
-  private openInGhostty(command: string): boolean {
-    try {
-      const title = `MIDE: ${this.sessionName}`;
-      spawn("open", ["-na", "Ghostty.app", "--args", "--title", title, "-e", "/bin/bash", "-c", command], {
-        detached: true,
-        stdio: "ignore",
-      }).unref();
-      console.error(`[mide] Opened Ghostty attached to ${this.sessionName}`);
-      return true;
-    } catch (err) {
-      console.error(`[mide] Failed to open Ghostty: ${err}`);
-      return false;
-    }
-  }
-
-  /**
-   * Open iTerm2 with command via AppleScript
-   */
-  private openInITerm(command: string): boolean {
-    try {
-      const title = `MIDE: ${this.sessionName}`;
-      // Escape double quotes in command for AppleScript
-      const escapedCommand = command.replace(/"/g, '\\"');
-      const script = `
-tell application "iTerm2"
-  create window with default profile
-  tell current session of current window
-    set name to "${title}"
-    write text "${escapedCommand}"
-  end tell
-end tell`;
-      spawn("osascript", ["-e", script], { detached: true, stdio: "ignore" }).unref();
-      console.error(`[mide] Opened iTerm2 attached to ${this.sessionName}`);
-      return true;
-    } catch (err) {
-      console.error(`[mide] Failed to open iTerm2: ${err}`);
-      return false;
-    }
-  }
-
-  /**
-   * Open Kitty with command
-   */
-  private openInKitty(command: string): boolean {
-    const title = `MIDE: ${this.sessionName}`;
-    try {
-      // Try kitty in PATH first, fall back to full path
-      spawn("kitty", ["--title", title, "-e", "/bin/bash", "-c", command], {
-        detached: true,
-        stdio: "ignore",
-      }).unref();
-      console.error(`[mide] Opened Kitty attached to ${this.sessionName}`);
-      return true;
-    } catch (err) {
-      // Try full path as fallback
+      // Apply tiled layout for even distribution
       try {
-        spawn("/Applications/kitty.app/Contents/MacOS/kitty", ["--title", title, "-e", "/bin/bash", "-c", command], {
-          detached: true,
-          stdio: "ignore",
-        }).unref();
-        console.error(`[mide] Opened Kitty attached to ${this.sessionName}`);
-        return true;
-      } catch (err2) {
-        console.error(`[mide] Failed to open Kitty: ${err2}`);
-        return false;
+        await execFileAsync("tmux", [
+          "select-layout", "-t", `${this.sessionName}:0`, "tiled",
+        ]);
+      } catch {
+        // Ignore - might be single pane
       }
     }
   }
 
   /**
-   * Open Terminal.app with command (fallback)
+   * Kill all panes in window 0 (dashboard) except the first one
+   * Returns the first pane ID for reuse
    */
-  private async openInTerminalApp(command: string): Promise<boolean> {
-    try {
-      const fs = await import("fs");
-      const os = await import("os");
-      const path = await import("path");
+  async clearDashboardPanes(): Promise<string | null> {
+    const paneIds = await this.getWindow0PaneIds();
+    if (paneIds.length === 0) return null;
 
-      // Create a temporary .command script
-      const scriptPath = path.join(os.tmpdir(), `mide-attach-${this.sessionName}.command`);
-      const script = `#!/bin/bash\n${command}\n`;
-      fs.writeFileSync(scriptPath, script, { mode: 0o755 });
+    const firstPaneId = paneIds[0];
 
-      // Open it with default terminal
-      spawn("open", [scriptPath], { detached: true, stdio: "ignore" }).unref();
-
-      console.error(`[mide] Opened Terminal.app attached to ${this.sessionName}`);
-      return true;
-    } catch (err) {
-      console.error(`[mide] Failed to open Terminal.app: ${err}`);
-      return false;
+    // Kill all panes except the first one
+    for (let i = paneIds.length - 1; i >= 1; i--) {
+      try {
+        await execFileAsync("tmux", ["kill-pane", "-t", paneIds[i]]);
+      } catch {
+        // Pane may already be gone
+      }
     }
+
+    // Clear paneMap entries for killed panes
+    for (const [name, paneId] of this.paneMap.entries()) {
+      if (paneIds.includes(paneId) && paneId !== firstPaneId) {
+        this.paneMap.delete(name);
+      }
+    }
+
+    return firstPaneId;
+  }
+
+  /**
+   * Recreate dashboard layout (hot-reload safe)
+   * Clears existing dashboard panes and creates new ones
+   */
+  async recreateDashboardLayout(dashboard: Dashboard, cwd: string): Promise<void> {
+    await this.clearDashboardPanes();
+    await this.createDashboardLayout(dashboard, cwd);
   }
 }
 

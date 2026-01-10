@@ -1,29 +1,37 @@
 import { EventEmitter } from "events";
-import { TmuxManager } from "./tmux-manager.js";
 import * as path from "path";
 import * as fs from "fs";
 import * as os from "os";
 import { fileURLToPath } from "url";
 import { existsSync, readFileSync, unlinkSync } from "fs";
+import {
+  RESULT_PREFIX,
+  getResultFilePath,
+  buildInteractionEnv,
+  type FormSchema,
+} from "@mcp-ide/shared";
+import { emitResultEvent } from "./events.js";
+
+/**
+ * Common interface for tmux managers (TmuxManager and EmbeddedTmuxManager)
+ * Defines the methods needed by InteractionManager
+ */
+export interface TmuxPaneManager {
+  createPane(
+    name: string,
+    command: string,
+    cwd: string,
+    env?: Record<string, string>,
+    options?: { direction?: "auto" | "right" | "left" | "top" | "bottom"; skipRebalance?: boolean }
+  ): Promise<string>;
+  killPane(name: string): Promise<void>;
+  paneExists(name: string): Promise<boolean>;
+  capturePane(name: string, lines?: number): Promise<string>;
+}
 
 // ESM compatibility for __dirname
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
-/**
- * Result prefix used by ink-runner to signal completion (stdout fallback)
- */
-const RESULT_PREFIX = "__MCP_RESULT__:";
-
-/**
- * File-based result communication (primary method)
- * More reliable than stdout since it's synchronous
- */
-const RESULT_FILE_DIR = "/tmp";
-
-function getResultFilePath(interactionId: string): string {
-  return `${RESULT_FILE_DIR}/mcp-interaction-${interactionId}.result`;
-}
 
 /**
  * Directory name for interactive component files (relative to project root)
@@ -51,33 +59,22 @@ export interface InteractionState {
   timeoutMs?: number;
 }
 
-export interface FormQuestion {
-  question: string;
-  header: string;
-  options?: Array<{ label: string; description?: string }>;
-  multiSelect?: boolean;
-  inputType?: "text" | "textarea" | "password";
-  placeholder?: string;
-  validation?: string;
-}
-
-export interface FormSchema {
-  questions: FormQuestion[];
-}
-
 export interface CreateInteractionOptions {
   schema?: FormSchema;
   inkFile?: string;  // Path to custom Ink component file
+  inkArgs?: Record<string, unknown>;  // Args to pass to ink component
+  command?: string;  // Arbitrary command to run
   title?: string;
   group?: string;
   timeoutMs?: number;
 }
 
 interface InteractionManagerOptions {
-  tmuxManager: TmuxManager;
+  tmuxManager: TmuxPaneManager;
   inkRunnerPath?: string;
   pollIntervalMs?: number;
   cwd?: string;  // Project root directory for resolving ink_file paths
+  sessionName?: string;  // Tmux session name for events file
 }
 
 /**
@@ -85,23 +82,45 @@ interface InteractionManagerOptions {
  */
 export class InteractionManager extends EventEmitter {
   private interactions: Map<string, InteractionState> = new Map();
-  private tmuxManager: TmuxManager;
+  private tmuxManager: TmuxPaneManager;
   private inkRunnerPath: string;
   private pollIntervalMs: number;
   private pollTimers: Map<string, NodeJS.Timeout> = new Map();
   private idCounter = 0;
   private cwd: string;
+  private sessionName: string | undefined;
 
   constructor(options: InteractionManagerOptions) {
     super();
     this.tmuxManager = options.tmuxManager;
     this.pollIntervalMs = options.pollIntervalMs ?? 500;
     this.cwd = options.cwd ?? process.cwd();
+    this.sessionName = options.sessionName;
 
-    // Find ink-runner path relative to this module
-    // In production, it should be in ../packages/ink-runner/dist/index.js
-    // or installed as a dependency
+    // Find runner path relative to this module
     this.inkRunnerPath = options.inkRunnerPath ?? this.findInkRunnerPath();
+  }
+
+  /**
+   * Set the session name (for emitting events)
+   */
+  setSessionName(sessionName: string): void {
+    this.sessionName = sessionName;
+  }
+
+  /**
+   * Emit result to events file if session name is set
+   */
+  private emitResultToEventsFile(id: string, result: InteractionResult): void {
+    if (this.sessionName) {
+      emitResultEvent(
+        this.sessionName,
+        id,
+        result.action,
+        result.answers,
+        result.result
+      );
+    }
   }
 
   /**
@@ -166,48 +185,86 @@ export class InteractionManager extends EventEmitter {
   }
 
   /**
+   * Determine which runner to use based on options
+   * - inkFile → ink-runner (React components)
+   * - command → run command directly
+   * - schema → ink-runner with schema (rendered as form)
+   */
+  private selectRunner(options: CreateInteractionOptions): "ink" | "command" {
+    // Ink file specified → ink
+    if (options.inkFile) {
+      return "ink";
+    }
+
+    // Schema specified → ink (will be rendered as form)
+    if (options.schema) {
+      return "ink";
+    }
+
+    // Command → direct
+    if (options.command) {
+      return "command";
+    }
+
+    throw new Error("Must specify schema, inkFile, or command");
+  }
+
+  /**
    * Create a new interaction
    */
   async create(options: CreateInteractionOptions): Promise<string> {
     const id = `interaction-${++this.idCounter}-${Date.now()}`;
 
-    if (!options.schema && !options.inkFile) {
-      throw new Error("Either schema or inkFile is required");
+    if (!options.schema && !options.inkFile && !options.command) {
+      throw new Error("Either schema, inkFile, or command is required");
     }
 
-    const mode: InteractionMode = options.schema ? "schema" : "custom";
+    // Determine which runner to use
+    const runner = this.selectRunner(options);
+    const mode: InteractionMode = runner === "ink" ? "custom" : "schema";
 
-    // Build the command to run ink-runner
+    // Build environment variables for the interaction
+    const env = buildInteractionEnv(id);
+
+    // Build the command based on runner type
     let command: string;
-    const interactionIdArg = ` --interaction-id '${id}'`;  // For file-based result communication
-    if (options.schema) {
-      const schemaJson = JSON.stringify(options.schema);
-      const escapedSchema = schemaJson.replace(/'/g, "'\\''"); // Escape single quotes for shell
-      command = `node "${this.inkRunnerPath}" --schema '${escapedSchema}'${interactionIdArg}`;
-      if (options.title) {
-        const escapedTitle = options.title.replace(/'/g, "'\\''");
-        command += ` --title '${escapedTitle}'`;
+    const shellEscape = (s: string) => s.replace(/'/g, "'\\''");
+
+    switch (runner) {
+      case "ink": {
+        // Use ink-runner for custom React components or schema-based forms
+        if (options.inkFile) {
+          const resolvedPath = this.resolveInkFile(options.inkFile);
+          command = `node "${this.inkRunnerPath}" --file '${shellEscape(resolvedPath)}' --interaction-id '${id}'`;
+        } else if (options.schema) {
+          // Schema mode: pass schema to ink-runner (it has built-in form handling)
+          const schemaJson = JSON.stringify(options.schema);
+          command = `node "${this.inkRunnerPath}" --schema '${shellEscape(schemaJson)}' --interaction-id '${id}'`;
+        } else {
+          throw new Error("ink runner requires inkFile or schema");
+        }
+        if (options.title) {
+          command += ` --title '${shellEscape(options.title)}'`;
+        }
+        if (options.inkArgs) {
+          command += ` --args '${shellEscape(JSON.stringify(options.inkArgs))}'`;
+        }
+        break;
       }
-    } else if (options.inkFile) {
-      // Custom mode from file - saves tokens!
-      // Resolve relative paths from .mide/interactive directory
-      const resolvedPath = this.resolveInkFile(options.inkFile);
-      const escapedPath = resolvedPath.replace(/'/g, "'\\''");
-      command = `node "${this.inkRunnerPath}" --file '${escapedPath}'${interactionIdArg}`;
-      if (options.title) {
-        const escapedTitle = options.title.replace(/'/g, "'\\''");
-        command += ` --title '${escapedTitle}'`;
+
+      case "command": {
+        // Run arbitrary command directly
+        command = options.command!;
+        break;
       }
-    } else {
-      throw new Error("Either schema or inkFile is required");
     }
 
-    // Create tmux pane for the interaction
+    // Create tmux pane for the interaction with env vars
     const paneId = await this.tmuxManager.createPane(
       id,
       command,
       process.cwd(),
-      {}
+      env
     );
 
     const state: InteractionState = {
@@ -322,6 +379,7 @@ export class InteractionManager extends EventEmitter {
     // Update state
     state.status = "cancelled";
     state.result = { action: "cancel" };
+    this.emitResultToEventsFile(id, state.result);
     this.emit("interactionComplete", id, state.result);
 
     return true;
@@ -377,6 +435,7 @@ export class InteractionManager extends EventEmitter {
           state.result = { action: "timeout" };
           this.stopPolling(id);
           await this.cleanup(id);
+          this.emitResultToEventsFile(id, state.result);
           this.emit("interactionComplete", id, state.result);
           return;
         }
@@ -400,6 +459,7 @@ export class InteractionManager extends EventEmitter {
           try { unlinkSync(resultFilePath); } catch { /* ignore */ }
           // Clean up pane after small delay to allow output to be seen
           setTimeout(() => this.cleanup(id), 1000);
+          this.emitResultToEventsFile(id, result);
           this.emit("interactionComplete", id, result);
           return;
         }
@@ -415,6 +475,7 @@ export class InteractionManager extends EventEmitter {
         state.result = { action: "cancel" };
         this.stopPolling(id);
         this.interactions.delete(id);  // Remove from memory
+        this.emitResultToEventsFile(id, state.result);
         this.emit("interactionComplete", id, state.result);
         return;
       }
@@ -430,6 +491,7 @@ export class InteractionManager extends EventEmitter {
           this.stopPolling(id);
           // Clean up pane after small delay to allow output to be seen
           setTimeout(() => this.cleanup(id), 1000);
+          this.emitResultToEventsFile(id, result);
           this.emit("interactionComplete", id, result);
           return;
         }

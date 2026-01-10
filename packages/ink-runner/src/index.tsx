@@ -3,7 +3,7 @@
 import React from "react";
 import { render } from "ink";
 import { SchemaForm } from "./components/SchemaForm.js";
-import { emitResult, emitResultWithFile, setInteractionId } from "./types.js";
+import { emitResult, emitResultWithFile, setInteractionId, parseFormSchema, getSchemaHelp } from "./types.js";
 import { runFromFile } from "./file-runner.js";
 import type { FormSchema } from "./types.js";
 
@@ -44,6 +44,43 @@ function parseArgs(): CliArgs {
   return result;
 }
 
+/**
+ * Read JSON from stdin (non-blocking check, then blocking read if data available)
+ */
+async function readStdin(): Promise<string | null> {
+  // Check if stdin has data (is a pipe, not a TTY)
+  if (process.stdin.isTTY) {
+    return null;
+  }
+
+  return new Promise((resolve) => {
+    let data = "";
+    process.stdin.setEncoding("utf8");
+
+    // Set a short timeout in case stdin is empty but not TTY (e.g., /dev/null)
+    const timeout = setTimeout(() => {
+      process.stdin.removeAllListeners();
+      resolve(data || null);
+    }, 100);
+
+    process.stdin.on("data", (chunk) => {
+      data += chunk;
+    });
+
+    process.stdin.on("end", () => {
+      clearTimeout(timeout);
+      resolve(data || null);
+    });
+
+    process.stdin.on("error", () => {
+      clearTimeout(timeout);
+      resolve(null);
+    });
+
+    process.stdin.resume();
+  });
+}
+
 function showHelp(): void {
   console.log(`
 ink-runner - Interactive form runner for mcp-ide
@@ -51,37 +88,18 @@ ink-runner - Interactive form runner for mcp-ide
 Usage:
   ink-runner --schema '<json>' [--title 'Form Title']
   ink-runner --file /path/to/component.tsx [--title 'Title']
-  ink-runner -s '<json>' [-t 'Form Title']
+  echo '<json>' | ink-runner [--title 'Form Title']
 
 Options:
   -s, --schema <json>   JSON schema defining the form
   -f, --file <path>     Path to custom Ink component (.tsx/.jsx/.ts/.js)
   -t, --title <text>    Optional form/component title
   -h, --help            Show this help message
+  --no-sandbox          Disable sandboxing for custom components
 
-Either --schema or --file is required.
+Either --schema, --file, or piped stdin is required.
 
-Schema Format (for --schema mode):
-  {
-    "questions": [
-      {
-        "question": "What is your name?",
-        "header": "Name",
-        "inputType": "text",          // optional: text, textarea, password
-        "placeholder": "Enter name",  // optional
-        "validation": "^[a-zA-Z]+$"   // optional: regex pattern
-      },
-      {
-        "question": "Select your role",
-        "header": "Role",
-        "options": [
-          { "label": "Developer", "description": "Write code" },
-          { "label": "Designer", "description": "Create designs" }
-        ],
-        "multiSelect": false  // optional: true for checkbox-style
-      }
-    ]
-  }
+${getSchemaHelp()}
 
 Custom Component Format (for --file mode):
   - Must have a default export (React component)
@@ -101,7 +119,7 @@ Custom Component Format (for --file mode):
     export default MyComponent;
 
 Output:
-  On completion, prints: __MCP_RESULT__:{"action":"accept","answers/result":{...}}
+  On completion, prints: __MCP_RESULT__:{"action":"accept","answers":{...}}
   Actions: accept, decline, cancel
 
 Controls:
@@ -147,6 +165,27 @@ async function main(): Promise<void> {
         process.exit(1);
       }
     }
+
+    // Built-in: ask-user-question.tsx - use SchemaForm directly
+    const fileName = args.file.split("/").pop();
+    if (fileName === "ask-user-question.tsx" && componentArgs.schema) {
+      try {
+        const rawSchema = typeof componentArgs.schema === "string"
+          ? JSON.parse(componentArgs.schema)
+          : componentArgs.schema;
+        const schema = parseFormSchema(rawSchema);
+        const { waitUntilExit } = render(
+          <SchemaForm schema={schema} title={args.title} />
+        );
+        await waitUntilExit();
+        return;
+      } catch (err) {
+        console.error("Error:", err instanceof Error ? err.message : String(err));
+        emitResult({ action: "cancel" });
+        process.exit(1);
+      }
+    }
+
     await runFromFile({
       filePath: args.file,
       title: args.title,
@@ -156,9 +195,19 @@ async function main(): Promise<void> {
     return;
   }
 
-  // Mode 1: Schema-based form
-  if (!args.schema) {
-    console.error("Error: Either --schema or --file is required");
+  // Mode 1: Schema-based form (from --schema or stdin)
+  let schemaJson = args.schema;
+
+  // Try reading from stdin if no --schema provided
+  if (!schemaJson) {
+    const stdinData = await readStdin();
+    if (stdinData) {
+      schemaJson = stdinData.trim();
+    }
+  }
+
+  if (!schemaJson) {
+    console.error("Error: Either --schema, --file, or piped stdin is required");
     console.error("Run 'ink-runner --help' for usage");
     emitResult({ action: "cancel" });
     process.exit(1);
@@ -166,16 +215,10 @@ async function main(): Promise<void> {
 
   let schema: FormSchema;
   try {
-    schema = JSON.parse(args.schema);
+    const rawSchema = JSON.parse(schemaJson);
+    schema = parseFormSchema(rawSchema);
   } catch (err) {
-    console.error("Error: Invalid JSON schema");
-    console.error(err instanceof Error ? err.message : String(err));
-    emitResult({ action: "cancel" });
-    process.exit(1);
-  }
-
-  if (!schema.questions || !Array.isArray(schema.questions) || schema.questions.length === 0) {
-    console.error("Error: Schema must have at least one question");
+    console.error("Error:", err instanceof Error ? err.message : String(err));
     emitResult({ action: "cancel" });
     process.exit(1);
   }

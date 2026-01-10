@@ -20,7 +20,7 @@ if [ -n "$CONFIG_FILE" ]; then
 
   # Check if tmux session exists
   if tmux has-session -t "$SESSION" 2>/dev/null; then
-    echo "MIDE session: $SESSION (attach: tmux attach -t $SESSION)"
+    echo "MIDE session: $SESSION (attach: mide connect)"
     echo ""
 
     # Extract process names, ports, and descriptions from mide.yaml
@@ -94,7 +94,7 @@ END { if (proc != "" && port != "") print proc"|"port"|"desc }
 
     if [ -n "$PROJECT_INK" ] || [ -n "$GLOBAL_INK" ]; then
       echo ""
-      echo "Available ink files (for show_interaction):"
+      echo "Available ink files (run with: "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/scripts/mide.sh" run <file>.tsx):"
       if [ -n "$PROJECT_INK" ]; then
         echo "  Project (.mide/interactive/):"
         echo "$PROJECT_INK" | sed 's/^/    /'
@@ -106,10 +106,10 @@ END { if (proc != "" && port != "") print proc"|"port"|"desc }
     fi
 
     echo ""
-    echo "Use /ide:start to manage processes and create terminals."
+    echo "Use /ide:start to manage services and create terminals."
   else
     echo "MIDE project detected but session not running."
-    echo "Processes will start when MCP tools are used."
+    echo "Run /ide:start or '"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/scripts/mide.sh" connect' to start the session."
 
     # Still show ink files even if session not running
     PROJECT_INK_DIR="$WORKSPACE/.mide/interactive"
@@ -128,7 +128,7 @@ END { if (proc != "" && port != "") print proc"|"port"|"desc }
 
     if [ -n "$PROJECT_INK" ] || [ -n "$GLOBAL_INK" ]; then
       echo ""
-      echo "Available ink files (for show_interaction):"
+      echo "Available ink files (run with: "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/scripts/mide.sh" run <file>.tsx):"
       if [ -n "$PROJECT_INK" ]; then
         echo "  Project (.mide/interactive/):"
         echo "$PROJECT_INK" | sed 's/^/    /'

@@ -1,0 +1,17 @@
+tabs:
+  # Layout tab example (multi-pane)
+  dashboard:
+    - ["while true; do htop -d 30; done", "while true; do date; sleep 1; done"]
+    - ["while true; do ls -la; sleep 2; done", bash]
+
+  # Service tabs (single pane with managed process)
+  echo-svc:
+    command: "while true; do echo \"[$(date +%H:%M:%S)] Echo service running...\"; sleep 5; done"
+    description: "Test echo service"
+
+  counter:
+    command: "i=0; while true; do echo \"Count: $i\"; i=$((i+1)); sleep 3; done"
+    description: "Counter service"
+
+settings:
+  sessionName: mcp-sidecar

@@ -1,14 +1,20 @@
 ---
-allowed-tools: mcp__ide__get_logs, mcp__ide__list_processes
+allowed-tools: Bash
 ---
 
-Get logs for process: $ARGUMENTS
+View logs for service: $ARGUMENTS
 
-If no process name is specified, first list available processes and ask which one.
+First run `"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/scripts/mide.sh" ls` to get the log file paths, then use `tail` to view logs:
 
-Show the last 50 lines by default. Highlight any lines containing "error", "Error", or "ERROR" in red.
+```bash
+# List services and their log paths
+"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/scripts/mide.sh" ls
 
-Options the user might provide:
-- Process name as first argument
-- "all" to show combined stdout and stderr
-- A number to change the tail count (e.g., "100" for last 100 lines)
+# View logs (last 100 lines)
+tail -n 100 /tmp/mide-<session>/<service>.log
+
+# Follow logs in real-time
+tail -f /tmp/mide-<session>/<service>.log
+```
+
+If no service name is specified, first run `"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/scripts/mide.sh" ls` to list available services and their log paths.
