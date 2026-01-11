@@ -7,28 +7,28 @@ import {
 
 describe("tmux-manager path functions", () => {
   describe("getSessionLogDir", () => {
-    it("should return .mide under configDir", () => {
-      expect(getSessionLogDir("/path/to/project")).toBe("/path/to/project/.mide");
+    it("should return .termos under configDir", () => {
+      expect(getSessionLogDir("/path/to/project")).toBe("/path/to/project/.termos");
     });
 
     it("should handle nested paths", () => {
-      expect(getSessionLogDir("/home/user/code/my-app")).toBe("/home/user/code/my-app/.mide");
+      expect(getSessionLogDir("/home/user/code/my-app")).toBe("/home/user/code/my-app/.termos");
     });
   });
 
   describe("getServiceLogPath", () => {
-    it("should return log file under .mide", () => {
-      expect(getServiceLogPath("/path/to/project", "api")).toBe("/path/to/project/.mide/api.log");
+    it("should return log file under .termos", () => {
+      expect(getServiceLogPath("/path/to/project", "api")).toBe("/path/to/project/.termos/api.log");
     });
 
     it("should handle service names with dashes", () => {
-      expect(getServiceLogPath("/path/to/project", "my-service")).toBe("/path/to/project/.mide/my-service.log");
+      expect(getServiceLogPath("/path/to/project", "my-service")).toBe("/path/to/project/.termos/my-service.log");
     });
   });
 
   describe("getEventsFilePath", () => {
-    it("should return events.jsonl under .mide", () => {
-      expect(getEventsFilePath("/path/to/project")).toBe("/path/to/project/.mide/events.jsonl");
+    it("should return events.jsonl under .termos", () => {
+      expect(getEventsFilePath("/path/to/project")).toBe("/path/to/project/.termos/events.jsonl");
     });
   });
 });

@@ -106,11 +106,11 @@ async function bundle() {
   // Build ink-runner (clack-runner has been removed)
   await bundlePackage('ink-runner');
 
-  // Copy shared into runner's node_modules so they can resolve @mcp-ide/shared
+  // Copy shared into runner's node_modules so they can resolve @termosdev/shared
   console.log('\nLinking shared package to ink-runner...');
   const sharedDist = path.join(projectRoot, 'dist/shared');
 
-  const runnerSharedDest = path.join(projectRoot, 'dist/ink-runner/node_modules/@mcp-ide/shared');
+  const runnerSharedDest = path.join(projectRoot, 'dist/ink-runner/node_modules/@termosdev/shared');
   if (fs.existsSync(runnerSharedDest)) {
     fs.rmSync(runnerSharedDest, { recursive: true });
   }

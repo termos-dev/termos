@@ -4,28 +4,28 @@ import { getEventsFilePath } from "./tmux-manager.js";
 /**
  * Event types for the MIDE events file
  */
-export type MideEventType = "ready" | "error" | "result" | "reload" | "status";
+export type TermosEventType = "ready" | "error" | "result" | "reload" | "status";
 
-export interface MideEventBase {
+export interface TermosEventBase {
   ts: number;
-  type: MideEventType;
+  type: TermosEventType;
 }
 
-export interface ReadyEvent extends MideEventBase {
+export interface ReadyEvent extends TermosEventBase {
   type: "ready";
   svc: string;
   port?: number;
   url?: string;
 }
 
-export interface ErrorEvent extends MideEventBase {
+export interface ErrorEvent extends TermosEventBase {
   type: "error";
   svc: string;
   msg: string;
   exit?: number;
 }
 
-export interface ResultEvent extends MideEventBase {
+export interface ResultEvent extends TermosEventBase {
   type: "result";
   id: string;
   action: "accept" | "decline" | "cancel" | "timeout";
@@ -33,7 +33,7 @@ export interface ResultEvent extends MideEventBase {
   result?: unknown;
 }
 
-export interface ReloadEvent extends MideEventBase {
+export interface ReloadEvent extends TermosEventBase {
   type: "reload";
   added: string[];
   removed: string[];
@@ -41,24 +41,24 @@ export interface ReloadEvent extends MideEventBase {
   dashboardReloaded: boolean;
 }
 
-export interface StatusEvent extends MideEventBase {
+export interface StatusEvent extends TermosEventBase {
   type: "status";
   message: string | null;
   prompts?: string[];
 }
 
-export type MideEvent = ReadyEvent | ErrorEvent | ResultEvent | ReloadEvent | StatusEvent;
+export type TermosEvent = ReadyEvent | ErrorEvent | ResultEvent | ReloadEvent | StatusEvent;
 
 /**
  * Append an event to the events file atomically
  */
-function appendEvent(configDir: string, event: MideEvent): void {
+function appendEvent(configDir: string, event: TermosEvent): void {
   const filePath = getEventsFilePath(configDir);
   const line = JSON.stringify(event) + "\n";
   try {
     fs.appendFileSync(filePath, line, { flag: "a" });
   } catch (err) {
-    console.error(`[mide] Failed to write event: ${err}`);
+    console.error(`[termos] Failed to write event: ${err}`);
   }
 }
 
@@ -127,15 +127,15 @@ export function getLatestStatus(configDir: string): StatusEvent | null {
 }
 
 /** Read all events from the events file */
-export function readEvents(configDir: string): MideEvent[] {
+export function readEvents(configDir: string): TermosEvent[] {
   const filePath = getEventsFilePath(configDir);
   try {
     if (!fs.existsSync(filePath)) return [];
     const content = fs.readFileSync(filePath, "utf-8");
     return content.trim().split("\n").filter(Boolean).map(line => {
-      try { return JSON.parse(line) as MideEvent; }
+      try { return JSON.parse(line) as TermosEvent; }
       catch { return null; }
-    }).filter((e): e is MideEvent => e !== null);
+    }).filter((e): e is TermosEvent => e !== null);
   } catch {
     return [];
   }

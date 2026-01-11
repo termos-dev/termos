@@ -80,7 +80,7 @@ async function readStdin(): Promise<string | null> {
 
 function showHelp(): void {
   console.log(`
-ink-runner - Interactive form runner for mcp-ide
+ink-runner - Interactive form runner for termos
 
 Usage:
   ink-runner --schema '<json>' [--title 'Form Title']

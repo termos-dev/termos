@@ -2,14 +2,14 @@
 allowed-tools: Bash
 ---
 
-Start the IDE session.
+Start the Termos session.
 
 Run with `run_in_background: true`:
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/scripts/mide" up --stream
+"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/scripts/termos" up --stream
 ```
 
 ALWAYS end your response with:
 ```
-To view the IDE session, run: `mide connect`
+To view the Termos session, run: `termos connect`
 ```

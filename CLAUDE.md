@@ -2,33 +2,33 @@
 
 ## Local Development Alias
 
-To use `mide` command locally during development:
+To use `termos` command locally during development:
 
 ```bash
 # Add to ~/.zshrc for persistent alias
-echo 'alias mide="/Users/burakemre/Code/ai-experiments/mcp-sidecar/.claude-plugin/scripts/mide"' >> ~/.zshrc
+echo 'alias termos="/Users/burakemre/Code/ai-experiments/mcp-sidecar/.claude-plugin/scripts/termos"' >> ~/.zshrc
 source ~/.zshrc
 
 # Or for current session only
-alias mide="/Users/burakemre/Code/ai-experiments/mcp-sidecar/.claude-plugin/scripts/mide"
+alias termos="/Users/burakemre/Code/ai-experiments/mcp-sidecar/.claude-plugin/scripts/termos"
 ```
 
 Then run:
 ```bash
-mide connect    # Attach to tmux session
-mide status     # Show service status
-mide up         # Start services in background
-mide down       # Stop services
+termos connect    # Attach to tmux session
+termos status     # Show service status
+termos up         # Start services in background
+termos down       # Stop services
 ```
 
-## Important: Always Use mide CLI
+## Important: Always Use termos CLI
 
 ```bash
-mide connect              # Attach to session
-mide down                 # Stop session
-mide sessions             # List sessions
-mide ls                   # List tabs/panes
-mide status               # Check service status
+termos connect              # Attach to session
+termos down                 # Stop session
+termos sessions             # List sessions
+termos ls                   # List tabs/panes
+termos status               # Check service status
 
 # During local development
 node dist/index.js connect

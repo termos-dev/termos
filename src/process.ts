@@ -338,9 +338,9 @@ export class ManagedProcess {
         const shouldForce = options.force ?? this.config.force;
 
         if (shouldForce) {
-          console.error(`[mide] Port ${this.config.port} in use by PID ${conflictPid}, force-killing...`);
+          console.error(`[termos] Port ${this.config.port} in use by PID ${conflictPid}, force-killing...`);
           if (await killProcess(conflictPid)) {
-            console.error(`[mide] Killed PID ${conflictPid}`);
+            console.error(`[termos] Killed PID ${conflictPid}`);
           } else {
             throw new Error(`Failed to kill process ${conflictPid} using port ${this.config.port}`);
           }
@@ -379,7 +379,7 @@ export class ManagedProcess {
     );
 
     this.lastCapturedOutput = "";
-    console.error(`[mide] Started "${this.name}" in tmux window (pane ${this.paneId})`);
+    console.error(`[termos] Started "${this.name}" in tmux window (pane ${this.paneId})`);
 
     // Mark as running immediately (port detection happens async)
     this._status = "running";
@@ -1005,7 +1005,7 @@ export class ManagedProcess {
 
     // If pane was killed externally, fall back to full start
     if (!this.paneId) {
-      console.error(`[mide] Pane for "${this.name}" was killed, creating new window`);
+      console.error(`[termos] Pane for "${this.name}" was killed, creating new window`);
       await this.start(options);
       return;
     }
@@ -1055,7 +1055,7 @@ export class ManagedProcess {
     const commandWithBanner = `${banner} && ${fullCommand}`;
 
     this.lastCapturedOutput = "";
-    console.error(`[mide] Restarting "${this.name}" in tmux window (pane ${this.paneId})`);
+    console.error(`[termos] Restarting "${this.name}" in tmux window (pane ${this.paneId})`);
 
     // Respawn in existing pane
     await this.tmuxManager.respawnPane(

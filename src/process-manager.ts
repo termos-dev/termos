@@ -247,7 +247,7 @@ export class ProcessManager extends EventEmitter {
 
     // Create all tabs from config
     if (config.tabs && Object.keys(config.tabs).length > 0) {
-      console.error(`[mide] Creating ${Object.keys(config.tabs).length} tab(s)`);
+      console.error(`[termos] Creating ${Object.keys(config.tabs).length} tab(s)`);
 
       // Track which tabs are layouts vs services
       this.layoutTabs.clear();
@@ -267,7 +267,7 @@ export class ProcessManager extends EventEmitter {
           if (processConfig) {
             const blockReason = this.getAutoStartBlockReason(processConfig);
             if (blockReason) {
-              console.error(`[mide] Not auto-starting "${name}" (${blockReason})`);
+              console.error(`[termos] Not auto-starting "${name}" (${blockReason})`);
               return;
             }
             this.startManagedProcess(processConfig);
@@ -301,12 +301,12 @@ export class ProcessManager extends EventEmitter {
       };
     });
 
-    // Find interactive files in .mide/interactive/ (project) and ~/.mide/interactive/ (global)
+    // Find interactive files in .termos/interactive/ (project) and ~/.termos/interactive/ (global)
     let projectInteractive: string[] = [];
     let globalInteractive: string[] = [];
 
-    const projectInteractiveDir = path.join(this.configDir, ".mide/interactive");
-    const globalInteractiveDir = path.join(process.env.HOME || "~", ".mide/interactive");
+    const projectInteractiveDir = path.join(this.configDir, ".termos/interactive");
+    const globalInteractiveDir = path.join(process.env.HOME || "~", ".termos/interactive");
 
     try {
       const fs = await import("fs");
@@ -361,8 +361,8 @@ export class ProcessManager extends EventEmitter {
 
     if (!welcomePath) {
       // Fallback: show a simple message that stays alive
-      console.error("[mide] Welcome component not found, using fallback");
-      const fallbackCmd = `echo "Welcome to mide - Session: ${this.tmuxManager.sessionName}" && echo "" && echo "Tabs: Use Ctrl-b <number> to switch tabs" && echo "" && tail -f /dev/null`;
+      console.error("[termos] Welcome component not found, using fallback");
+      const fallbackCmd = `echo "Welcome to Termos - Session: ${this.tmuxManager.sessionName}" && echo "" && echo "Tabs: Use Ctrl-b <number> to switch tabs" && echo "" && tail -f /dev/null`;
       const initialPaneId = await this.tmuxManager.getWindow0InitialPaneId();
       if (initialPaneId) {
         this.tmuxManager.registerPane("__welcome__", initialPaneId);
@@ -383,7 +383,7 @@ export class ProcessManager extends EventEmitter {
     if (initialPaneId) {
       this.tmuxManager.registerPane("__welcome__", initialPaneId);
       await this.tmuxManager.respawnPane("__welcome__", welcomeCommand, this.configDir);
-      console.error("[mide] Welcome component started");
+      console.error("[termos] Welcome component started");
     }
   }
 
@@ -563,7 +563,7 @@ export class ProcessManager extends EventEmitter {
 
     // Stop removed processes
     for (const name of removed) {
-      console.error(`[mide] Stopping removed process "${name}"`);
+      console.error(`[termos] Stopping removed process "${name}"`);
       const process = this.processes.get(name);
       if (process) {
         await process.stop();
@@ -580,7 +580,7 @@ export class ProcessManager extends EventEmitter {
 
     // Restart changed processes
     for (const name of changed) {
-      console.error(`[mide] Restarting changed process "${name}"`);
+      console.error(`[termos] Restarting changed process "${name}"`);
       const process = this.processes.get(name);
       if (process) {
         await process.stop();
@@ -653,10 +653,10 @@ export class ProcessManager extends EventEmitter {
       if (added.includes(processConfig.name) || changed.includes(processConfig.name)) {
         const blockReason = this.getAutoStartBlockReason(processConfig);
         if (blockReason && !wasRunning.has(processConfig.name)) {
-          console.error(`[mide] Not auto-starting "${processConfig.name}" (${blockReason})`);
+          console.error(`[termos] Not auto-starting "${processConfig.name}" (${blockReason})`);
           continue;
         }
-        console.error(`[mide] Starting process "${processConfig.name}"`);
+        console.error(`[termos] Starting process "${processConfig.name}"`);
         await this.startManagedProcess(processConfig);
       }
     }
@@ -666,7 +666,7 @@ export class ProcessManager extends EventEmitter {
     let tabsReloaded = false;
 
     if (!tabsEqual(oldTabs, newTabs)) {
-      console.error("[mide] Tabs config changed - recreating all tabs");
+      console.error("[termos] Tabs config changed - recreating all tabs");
 
       // Kill all tab windows (windows 1+)
       await this.tmuxManager.killAllTabWindows();
@@ -692,7 +692,7 @@ export class ProcessManager extends EventEmitter {
             if (processConfig) {
               const blockReason = this.getAutoStartBlockReason(processConfig);
               if (blockReason && !wasRunning.has(name)) {
-                console.error(`[mide] Not auto-starting "${name}" (${blockReason})`);
+                console.error(`[termos] Not auto-starting "${name}" (${blockReason})`);
                 return;
               }
               this.startManagedProcess(processConfig);
@@ -791,7 +791,7 @@ export class ProcessManager extends EventEmitter {
         clearTimeout(existingTimer);
       }
 
-      console.error(`[mide] Process "${name}" exited (code=${exitCode}), restarting in ${delay}ms (attempt ${process.restartCount + 1}/${config.maxRestarts})`);
+      console.error(`[termos] Process "${name}" exited (code=${exitCode}), restarting in ${delay}ms (attempt ${process.restartCount + 1}/${config.maxRestarts})`);
 
       // Schedule restart
       const timer = setTimeout(async () => {
@@ -805,7 +805,7 @@ export class ProcessManager extends EventEmitter {
 
       this.restartTimers.set(name, timer);
     } else if (shouldRestart) {
-      console.error(`[mide] Process "${name}" exceeded max restarts (${config.maxRestarts}), giving up`);
+      console.error(`[termos] Process "${name}" exceeded max restarts (${config.maxRestarts}), giving up`);
       // Show failure banner in the pane
       this.showFailureBanner(name, exitCode, config.maxRestarts);
     }
@@ -1086,7 +1086,7 @@ export class ProcessManager extends EventEmitter {
         };
 
         this.dynamicTerminals.set(name, terminal);
-        console.error(`[mide] Replaced welcome pane with terminal "${name}"`);
+        console.error(`[termos] Replaced welcome pane with terminal "${name}"`);
 
         return terminal;
       }
@@ -1111,7 +1111,7 @@ export class ProcessManager extends EventEmitter {
     };
 
     this.dynamicTerminals.set(name, terminal);
-    console.error(`[mide] Created dynamic terminal "${name}" in group "${targetGroup}"`);
+    console.error(`[termos] Created dynamic terminal "${name}" in group "${targetGroup}"`);
 
     return terminal;
   }
@@ -1133,7 +1133,7 @@ export class ProcessManager extends EventEmitter {
     await this.tmuxManager.killPane(name);
 
     this.dynamicTerminals.delete(name);
-    console.error(`[mide] Removed dynamic terminal "${name}"`);
+    console.error(`[termos] Removed dynamic terminal "${name}"`);
   }
 
   /**

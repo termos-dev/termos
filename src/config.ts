@@ -37,7 +37,7 @@ export const ProcessConfigSchema = z.object({
 export type ProcessConfig = z.infer<typeof ProcessConfigSchema>;
 
 // Reserved tab names that cannot be used
-const RESERVED_TAB_NAMES = ["__welcome__", "mide"];
+const RESERVED_TAB_NAMES = ["__welcome__", "termos"];
 
 // Validate tab name: no reserved names, no special tmux chars
 export function validateTabName(name: string): { valid: boolean; error?: string } {
@@ -178,8 +178,8 @@ export const SettingsSchema = z.object({
   // Tmux settings
   tmuxSessionPrefix: z
     .string()
-    .default("mide")
-    .describe("Prefix for tmux session names (default: mide)"),
+    .default("termos")
+    .describe("Prefix for tmux session names (default: termos)"),
   // Split direction when running inside tmux
   splitDirection: SplitDirectionSchema
     .describe("Direction to split pane: auto, right, left, top, bottom (default: auto)"),
@@ -188,11 +188,6 @@ export const SettingsSchema = z.object({
     .string()
     .optional()
     .describe("Custom session name (supports $ENV_VAR). Overrides auto-detection from directory name."),
-  // Hot-reload setting
-  hotReload: z
-    .boolean()
-    .default(true)
-    .describe("Enable automatic config reload when mide.yaml changes (default: true)"),
 });
 
 export type Settings = z.infer<typeof SettingsSchema>;
@@ -255,7 +250,7 @@ export interface ResolvedProcessConfig extends Omit<ProcessConfig, 'dependsOn'> 
   dependsOn?: string[];
 }
 
-const CONFIG_FILENAMES = ["mide.yaml", "mide.yml"];
+const CONFIG_FILENAMES = ["termos.yaml", "termos.yml"];
 
 /**
  * Check if a config file exists in the current working directory

@@ -2,12 +2,20 @@
 
 import * as fs from "fs";
 import * as path from "path";
+import { ZodError } from "zod";
 import { loadConfig, configExists, expandEnvVars } from "./config.js";
 import { ProcessManager } from "./process-manager.js";
 import { TmuxManager, listIdeSessions, isInsideTmux, cleanupStaleSession } from "./tmux-manager.js";
 import { InteractionManager, type InteractionResult } from "./interaction-manager.js";
 import { emitReloadEvent, emitStatusEvent, getLatestStatus } from "./events.js";
-import { parseFormSchema, type FormSchema } from "@mcp-ide/shared";
+import { parseFormSchema, type FormSchema } from "@termosdev/shared";
+
+function formatError(err: unknown): string {
+  if (err instanceof ZodError) {
+    return err.issues.map(i => i.path.length ? `${i.path.join(".")}: ${i.message}` : i.message).join("\n");
+  }
+  return err instanceof Error ? err.message : String(err);
+}
 
 /** Read from stdin if piped */
 async function readStdin(): Promise<string | null> {
@@ -45,35 +53,35 @@ function formatAge(date: Date): string {
 
 function showHelp(): void {
   console.log(`
-mide - Interactive Development Environment for Claude Code
+termos - Interactive Development Environment for Claude Code
 
 Usage:
-  mide up                     Start services and attach (foreground)
-  mide up -d                  Start services in background (detached)
-  mide up --stream            Start and stream events (for agents, use run_in_background)
-  mide connect                Attach to existing session
-  mide connect --stream       Stream events from existing session
-  mide down                   Stop session
-  mide sessions               List active sessions
+  termos up                     Start services and attach (foreground)
+  termos up -d                  Start services in background (detached)
+  termos up --stream            Start and stream events (for agents, use run_in_background)
+  termos connect                Attach to existing session
+  termos connect --stream       Stream events from existing session
+  termos down                   Stop session
+  termos sessions               List active sessions
 
-  mide ls                     List tabs and services
-  mide start <service>        Start a service
-  mide stop <service>         Stop a service
-  mide restart <service>      Restart a service
-  mide reload                 Reload config (hot-reload)
+  termos ls                     List tabs and services
+  termos start <service>        Start a service
+  termos stop <service>         Stop a service
+  termos restart <service>      Restart a service
+  termos reload                 Reload config (hot-reload)
 
-  mide pane <name> <cmd>      Create a terminal pane
-  mide rm <name>              Remove a pane
-  mide send <pane> <keys>     Send keys to a pane
+  termos pane <name> <cmd>      Create a terminal pane
+  termos rm <name>              Remove a pane
+  termos send <pane> <keys>     Send keys to a pane
 
-  mide status "msg"           Set LLM status (shown in welcome page + tmux title)
-  mide status "msg" --prompt "suggestion"  Set status with suggested prompts
-  mide status --clear         Clear status
-  mide status                 Show current status
+  termos status "msg"           Set LLM status (shown in welcome page + tmux title)
+  termos status "msg" --prompt "suggestion"  Set status with suggested prompts
+  termos status --clear         Clear status
+  termos status                 Show current status
 
-  mide ask                    Ask user questions (schema from stdin)
-  mide run <file.tsx>         Run an Ink component
-  mide run -- <command>       Run a shell command in Canvas
+  termos ask                    Ask user questions (schema from stdin)
+  termos run <file.tsx>         Run an Ink component
+  termos run -- <command>       Run a shell command in Canvas
 
 Options:
   -d, --detach    Run in background (don't attach)
@@ -82,8 +90,8 @@ Options:
   -h, --help      Show this help
 
 Agent Usage:
-  echo '{"questions":[...]}' | mide ask   # Ask user questions
-  mide run component.tsx --prompt "Hi"    # Run with args
+  echo '{"questions":[...]}' | termos ask   # Ask user questions
+  termos run component.tsx --prompt "Hi"    # Run with args
 `);
 }
 
@@ -100,14 +108,14 @@ async function main() {
   if (cmd === "sessions") {
     const sessions = await listIdeSessions();
     if (sessions.length === 0) {
-      console.log("No active sessions. Run 'mide up' to start.");
+      console.log("No active sessions. Run 'termos up' to start.");
     } else {
       console.log("SESSIONS\n");
       for (const s of sessions) {
         const status = s.isStale ? "[STALE]" : "[ACTIVE]";
         console.log(`  ${s.name.padEnd(25)} ${s.windows} win  ${formatAge(s.created).padEnd(4)}  ${status}`);
       }
-      console.log("\nUse: mide connect <name> | mide gc");
+      console.log("\nUse: termos connect <name> | termos gc");
     }
     process.exit(0);
   }
@@ -136,7 +144,7 @@ async function main() {
     const stream = args.includes("--stream") && !detach;
 
     if (!configExists()) {
-      console.error(json ? JSON.stringify({ error: "No mide.yaml" }) : "No mide.yaml found");
+      console.error(json ? JSON.stringify({ error: "No termos.yaml" }) : "No termos.yaml found");
       process.exit(1);
     }
 
@@ -274,7 +282,7 @@ async function main() {
 
     if (isInsideTmux()) {
       const embedded = await TmuxManager.createEmbedded();
-      await embedded.createPane("mide-view", `TMUX= tmux attach -t ${tmux.sessionName}`, process.cwd(), undefined, { direction: "auto", skipRebalance: true });
+      await embedded.createPane("termos-view", `TMUX= tmux attach -t ${tmux.sessionName}`, process.cwd(), undefined, { direction: "auto", skipRebalance: true });
       console.log(`Opened in split pane`);
       process.exit(0);
     }
@@ -304,7 +312,7 @@ async function main() {
       : { config: null, tmux: TmuxManager.createOwned(path.basename(process.cwd())) };
 
     if (!(await tmux.sessionExists())) {
-      console.error(json ? JSON.stringify({ error: "No active session" }) : "No active session. Run: mide up");
+      console.error(json ? JSON.stringify({ error: "No active session" }) : "No active session. Run: termos up");
       process.exit(1);
     }
 
@@ -361,7 +369,7 @@ async function main() {
 
     if (isInsideTmux()) {
       const embedded = await TmuxManager.createEmbedded();
-      await embedded.createPane("mide-view", `TMUX= tmux attach -t ${tmux.sessionName}`, process.cwd(), undefined, { direction: "auto", skipRebalance: true });
+      await embedded.createPane("termos-view", `TMUX= tmux attach -t ${tmux.sessionName}`, process.cwd(), undefined, { direction: "auto", skipRebalance: true });
       console.log(`Opened in split pane`);
       process.exit(0);
     }
@@ -372,13 +380,26 @@ async function main() {
 
   // Commands that require active session
   if (!configExists()) {
-    console.error("No mide.yaml found");
+    console.error("No termos.yaml found");
     process.exit(1);
   }
 
-  const { config: loaded, tmux } = await loadConfigAndTmux();
+  let loaded: Awaited<ReturnType<typeof loadConfigAndTmux>>["config"];
+  let tmux: TmuxManager;
+  try {
+    const result = await loadConfigAndTmux();
+    loaded = result.config;
+    tmux = result.tmux;
+  } catch (err) {
+    if (cmd === "reload") {
+      console.error(`Reload failed: ${formatError(err)}`);
+      process.exit(1);
+    }
+    throw err;
+  }
+
   if (!(await tmux.sessionExists())) {
-    console.error(`No active session. Run: mide up`);
+    console.error(`No active session. Run: termos up`);
     process.exit(1);
   }
 
@@ -408,7 +429,7 @@ async function main() {
   // start/stop/restart
   if (cmd === "start" || cmd === "stop" || cmd === "restart") {
     const name = args[1];
-    if (!name) { console.error(`Usage: mide ${cmd} <service>`); process.exit(1); }
+    if (!name) { console.error(`Usage: termos ${cmd} <service>`); process.exit(1); }
     if (pm.isLayoutTab(name)) { console.error(`"${name}" is a layout tab`); process.exit(1); }
     if (cmd === "start") await pm.startProcess(name);
     else if (cmd === "stop") await pm.stopProcess(name);
@@ -419,17 +440,22 @@ async function main() {
 
   // reload
   if (cmd === "reload") {
-    const newLoaded = await loadConfig();
-    const result = await pm.reload(newLoaded.config);
-    emitReloadEvent(tmux.configDir, result.added, result.removed, result.changed, result.tabsReloaded);
-    console.log(`Reload: +${result.added.length} -${result.removed.length} ~${result.changed.length}`);
-    process.exit(0);
+    try {
+      const newLoaded = await loadConfig();
+      const result = await pm.reload(newLoaded.config);
+      emitReloadEvent(tmux.configDir, result.added, result.removed, result.changed, result.tabsReloaded);
+      console.log(`Reload: +${result.added.length} -${result.removed.length} ~${result.changed.length}`);
+      process.exit(0);
+    } catch (err) {
+      console.error(`Reload failed: ${formatError(err)}`);
+      process.exit(1);
+    }
   }
 
   // pane
   if (cmd === "pane") {
     const [, name, ...rest] = args;
-    if (!name || rest.length === 0) { console.error("Usage: mide pane <name> <command>"); process.exit(1); }
+    if (!name || rest.length === 0) { console.error("Usage: termos pane <name> <command>"); process.exit(1); }
     const terminal = await pm.createDynamicTerminal(name, rest.join(" "));
     console.log(`Created: ${terminal.name} (${terminal.paneId})`);
     process.exit(0);
@@ -438,7 +464,7 @@ async function main() {
   // rm
   if (cmd === "rm") {
     const name = args[1];
-    if (!name) { console.error("Usage: mide rm <name>"); process.exit(1); }
+    if (!name) { console.error("Usage: termos rm <name>"); process.exit(1); }
     await pm.removeDynamicTerminal(name);
     console.log(`Removed: ${name}`);
     process.exit(0);
@@ -447,7 +473,7 @@ async function main() {
   // send
   if (cmd === "send") {
     const [, pane, ...keys] = args;
-    if (!pane || keys.length === 0) { console.error("Usage: mide send <pane> <keys>"); process.exit(1); }
+    if (!pane || keys.length === 0) { console.error("Usage: termos send <pane> <keys>"); process.exit(1); }
     await tmux.sendKeys(pane, keys.join(" "));
     console.log(`Sent keys to ${pane}`);
     process.exit(0);
@@ -508,7 +534,7 @@ async function main() {
     const title = titleIdx > 0 ? args[titleIdx + 1] : undefined;
     const stdinData = await readStdin();
     if (!stdinData) {
-      console.error("Usage: echo '{\"questions\":[{\"question\":\"...\",\"header\":\"key\"}]}' | mide ask");
+      console.error("Usage: echo '{\"questions\":[{\"question\":\"...\",\"header\":\"key\"}]}' | termos ask");
       process.exit(1);
     }
 
@@ -539,11 +565,11 @@ async function main() {
 
     if (sepIdx !== -1) {
       command = restArgs.slice(sepIdx + 1).join(" ");
-      if (!command) { console.error("Usage: mide run -- <command>"); process.exit(1); }
+      if (!command) { console.error("Usage: termos run -- <command>"); process.exit(1); }
     } else {
       inkFile = restArgs[0];
       if (!inkFile?.endsWith(".tsx") && !inkFile?.endsWith(".jsx")) {
-        console.error("Usage: mide run <file.tsx> or mide run -- <command>");
+        console.error("Usage: termos run <file.tsx> or termos run -- <command>");
         process.exit(1);
       }
       // Parse --key value, --key=value, or --arg key=value
@@ -578,7 +604,7 @@ async function main() {
     process.exit(0);
   }
 
-  console.error(`Unknown command: ${cmd}\nRun 'mide help' for usage`);
+  console.error(`Unknown command: ${cmd}\nRun 'termos help' for usage`);
   process.exit(1);
 }
 

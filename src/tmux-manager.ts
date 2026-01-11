@@ -16,10 +16,10 @@ const execFileAsync = promisify(execFile);
 
 /**
  * Get the log directory for a session
- * Uses .mide/ in the config directory
+ * Uses .termos/ in the config directory
  */
 export function getSessionLogDir(configDir: string): string {
-  return path.join(configDir, ".mide");
+  return path.join(configDir, ".termos");
 }
 
 /**
@@ -37,11 +37,11 @@ export function getEventsFilePath(configDir: string): string {
 }
 
 /**
- * Get the owner file path (~/.mide/sessions/<session>)
+ * Get the owner file path (~/.termos/sessions/<session>)
  */
 function getOwnerFilePath(sessionName: string): string {
   const home = process.env.HOME || process.env.USERPROFILE || "";
-  return path.join(home, ".mide", "sessions", sessionName);
+  return path.join(home, ".termos", "sessions", sessionName);
 }
 
 /**
@@ -112,7 +112,7 @@ export function isSessionStale(sessionName: string): boolean {
  * Clean up a stale session (kill tmux session and remove owner file)
  */
 export async function cleanupStaleSession(sessionName: string): Promise<void> {
-  console.error(`[mide] Cleaning up stale session: ${sessionName}`);
+  console.error(`[termos] Cleaning up stale session: ${sessionName}`);
   try {
     await execFileAsync("tmux", ["kill-session", "-t", sessionName]);
   } catch {
@@ -149,7 +149,7 @@ export interface TmuxManagerOptions {
 /**
  * Get all active IDE tmux sessions
  */
-export async function listIdeSessions(prefix = "mide"): Promise<Array<{ name: string; windows: number; created: Date; clients: number; ownerPid: number | null; isStale: boolean }>> {
+export async function listIdeSessions(prefix = "termos"): Promise<Array<{ name: string; windows: number; created: Date; clients: number; ownerPid: number | null; isStale: boolean }>> {
   try {
     // Get sessions
     const { stdout } = await execFileAsync("tmux", [
@@ -235,7 +235,7 @@ export class TmuxManager {
 
   /** Create a TmuxManager that owns a dedicated session */
   static createOwned(projectName: string, options: TmuxManagerOptions = {}, configDir?: string): TmuxManager {
-    const prefix = options.sessionPrefix ?? "mide";
+    const prefix = options.sessionPrefix ?? "termos";
     const sessionName = `${prefix}-${projectName.replace(/[^a-zA-Z0-9_-]/g, "-").toLowerCase()}`;
     return new TmuxManager(sessionName, { configDir, mode: "owned" });
   }
@@ -255,15 +255,15 @@ export class TmuxManager {
         ]);
         sourcePaneId = stdout.trim();
       } catch {
-        console.error(`[mide] Warning: Could not get active pane for session ${session}`);
+        console.error(`[termos] Warning: Could not get active pane for session ${session}`);
       }
     }
-    console.error(`[mide] Embedded mode: session=${session}, sourcePaneId=${sourcePaneId}`);
+    console.error(`[termos] Embedded mode: session=${session}, sourcePaneId=${sourcePaneId}`);
 
     return new TmuxManager(session, { mode: "embedded", sourcePaneId });
   }
 
-  /** Get .mide directory path */
+  /** Get .termos directory path */
   getLogDir(): string {
     return getSessionLogDir(this.configDir);
   }
@@ -470,7 +470,7 @@ export class TmuxManager {
       const ageMs = Date.now() - createdTime;
       if (ageMs < 30000) {
         // Session exists and is recent, reuse it
-        console.error(`[mide] Reusing existing session: ${this.sessionName} (created ${Math.round(ageMs / 1000)}s ago)`);
+        console.error(`[termos] Reusing existing session: ${this.sessionName} (created ${Math.round(ageMs / 1000)}s ago)`);
         // Update owner PID to current process
         writeOwnerPid(this.sessionName);
         return this.sessionName;
@@ -502,7 +502,7 @@ export class TmuxManager {
       "-s",
       finalName,
       "-n",
-      "mide",
+      "termos",
       // Keep pane alive after command exits to capture exit status
       "-x", "200", // Set initial width
       "-y", "50",  // Set initial height
@@ -528,14 +528,14 @@ export class TmuxManager {
       (this as { sessionName: string }).sessionName = finalName;
     }
 
-    // Create .mide directory for logs
+    // Create .termos directory for logs
     const logDir = this.getLogDir();
     fs.mkdirSync(logDir, { recursive: true });
 
     // Create .gitignore to exclude runtime files from version control
     const gitignorePath = path.join(logDir, ".gitignore");
     if (!fs.existsSync(gitignorePath)) {
-      fs.writeFileSync(gitignorePath, "# MIDE runtime data - auto-generated\n*\n!.gitignore\n");
+      fs.writeFileSync(gitignorePath, "# Termos runtime data - auto-generated\n*\n!.gitignore\n");
     }
 
     // Initialize empty events file
@@ -665,7 +665,7 @@ export class TmuxManager {
         `cat >> ${this.shellEscape(logFile)}`,
       ]);
     } catch (err) {
-      console.error(`[mide] Warning: Failed to set up pipe-pane for ${serviceName}: ${err}`);
+      console.error(`[termos] Warning: Failed to set up pipe-pane for ${serviceName}: ${err}`);
     }
 
     this.paneMap.set(serviceName, paneId);
@@ -826,7 +826,7 @@ export class TmuxManager {
         // Layout tab: create window with multi-pane layout
         const windowIndex = await this.createLayoutTab(tabName, tabConfig as Dashboard, cwd);
         tabIndices.set(tabName, windowIndex);
-        console.error(`[mide] Created layout tab "${tabName}" at window ${windowIndex}`);
+        console.error(`[termos] Created layout tab "${tabName}" at window ${windowIndex}`);
       } else {
         // Service tab: create window with single pane
         const processConfig = normalizeTabToService(tabName, tabConfig);
@@ -850,7 +850,7 @@ export class TmuxManager {
           onServiceCreated(tabName, paneId, windowIndex);
         }
 
-        console.error(`[mide] Created service tab "${tabName}" at window ${windowIndex}`);
+        console.error(`[termos] Created service tab "${tabName}" at window ${windowIndex}`);
       }
     }
 
@@ -858,7 +858,7 @@ export class TmuxManager {
   }
 
   /**
-   * Kill all tab windows (windows 1+), preserving window 0 (mide/welcome)
+   * Kill all tab windows (windows 1+), preserving window 0 (termos/welcome)
    */
   async killAllTabWindows(): Promise<void> {
     try {
@@ -888,7 +888,7 @@ export class TmuxManager {
       // Clear pane map entries for killed windows
       this.paneMap.clear();
     } catch (err) {
-      console.error(`[mide] Error killing tab windows: ${err}`);
+      console.error(`[termos] Error killing tab windows: ${err}`);
     }
   }
 
@@ -1167,7 +1167,7 @@ export class TmuxManager {
       const panes = await this.listPanes();
       const match = panes.find(p => p.paneId === paneName);
       if (!match) {
-        console.error(`[mide] Pane "${paneName}" not found`);
+        console.error(`[termos] Pane "${paneName}" not found`);
         return false;
       }
     }
@@ -1177,7 +1177,7 @@ export class TmuxManager {
       await execFileAsync("tmux", ["select-pane", "-t", targetId]);
       return true;
     } catch (err) {
-      console.error(`[mide] Failed to select pane: ${err}`);
+      console.error(`[termos] Failed to select pane: ${err}`);
       return false;
     }
   }
@@ -1204,7 +1204,7 @@ export class TmuxManager {
       });
 
       child.on("error", (err) => {
-        console.error(`[mide] Failed to attach: ${err}`);
+        console.error(`[termos] Failed to attach: ${err}`);
         resolve(1);
       });
     });
@@ -1228,7 +1228,7 @@ export class TmuxManager {
   // ==================== Dashboard Methods ====================
 
   /**
-   * Get all pane IDs in window 0 (mide/dashboard window)
+   * Get all pane IDs in window 0 (termos/dashboard window)
    */
   async getWindow0PaneIds(): Promise<string[]> {
     try {
@@ -1265,7 +1265,7 @@ export class TmuxManager {
    * For flat arrays [a, b, c, d]: creates panes and applies tiled layout
    * For nested arrays [[a, b], [c, d]]: creates rows of columns
    *
-   * @param dashboard - Dashboard configuration from mide.yaml
+   * @param dashboard - Dashboard configuration from termos.yaml
    * @param cwd - Working directory for commands
    */
   async createDashboardLayout(dashboard: Dashboard, cwd: string): Promise<void> {
@@ -1280,7 +1280,7 @@ export class TmuxManager {
     // Get the initial pane ID (window 0 starts with one pane)
     const initialPaneId = await this.getWindow0InitialPaneId();
     if (!initialPaneId) {
-      console.error("[mide] No initial pane found in window 0");
+      console.error("[termos] No initial pane found in window 0");
       return;
     }
 

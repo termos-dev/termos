@@ -1,16 +1,16 @@
-# mcp-ide
+# termos
 
 Interactive Development Environment for Claude Code. Manage dev services, create terminal panes, show interactive forms.
 
 ## Installation
 
 ```bash
-npm install -g mcp-ide
+npm install -g @termosdev/cli
 ```
 
 ## Quick Start
 
-1. Create `mide.yaml` in your project:
+1. Create `termos.yaml` in your project:
 
 ```yaml
 services:
@@ -28,9 +28,9 @@ services:
 ```json
 {
   "mcpServers": {
-    "ide": {
+    "termos": {
       "command": "npx",
-      "args": ["-y", "mcp-ide"]
+      "args": ["-y", "@termosdev/cli"]
     }
   }
 }
@@ -42,35 +42,35 @@ services:
 
 ```bash
 # Session management
-mcp-ide up                    # Start session and services
-mcp-ide down                  # Stop session and services
-mcp-ide attach                # Attach to tmux session
-mcp-ide sessions              # List active sessions
+termos up                    # Start session and services
+termos down                  # Stop session and services
+termos attach                # Attach to tmux session
+termos sessions              # List active sessions
 
 # Service management (requires running session)
-mcp-ide ls                    # List services with status
-mcp-ide start <service>       # Start a service
-mcp-ide stop <service>        # Stop a service
-mcp-ide restart <service>     # Restart a service
-mcp-ide logs <name>           # Capture pane/service output
+termos ls                    # List services with status
+termos start <service>       # Start a service
+termos stop <service>        # Stop a service
+termos restart <service>     # Restart a service
+termos logs <name>           # Capture pane/service output
 
 # Panes and interaction
-mcp-ide pane <name> <cmd>     # Create terminal pane
-mcp-ide rm <name>             # Remove a pane
-mcp-ide ask <question>        # Ask user a question
-mcp-ide ink <file.tsx>        # Run custom Ink component
+termos pane <name> <cmd>     # Create terminal pane
+termos rm <name>             # Remove a pane
+termos ask <question>        # Ask user a question
+termos ink <file.tsx>        # Run custom Ink component
 ```
 
 ## Use Cases
 
 | Use Case | CLI | MCP Tool |
 |----------|-----|----------|
-| Check service status | `mcp-ide ls` | `list_services` |
-| Start/stop services | `mcp-ide start api` | `manage_service` |
-| View logs | `mcp-ide logs api` | `capture_pane` |
-| Run one-off command | `mcp-ide pane build "npm run build"` | `create_pane` |
-| Ask user a question | `mcp-ide ask "Deploy?"` | `show_user_interaction` |
-| Custom Ink component | `mcp-ide ink picker.tsx` | `show_user_interaction` |
+| Check service status | `termos ls` | `list_services` |
+| Start/stop services | `termos start api` | `manage_service` |
+| View logs | `termos logs api` | `capture_pane` |
+| Run one-off command | `termos pane build "npm run build"` | `create_pane` |
+| Ask user a question | `termos ask "Deploy?"` | `show_user_interaction` |
+| Custom Ink component | `termos ink picker.tsx` | `show_user_interaction` |
 
 ## Service Configuration
 
@@ -119,7 +119,7 @@ show_user_interaction({
 
 ## Custom Ink Components
 
-Create `.tsx` files in `.mide/interactive/`:
+Create `.tsx` files in `.termos/interactive/`:
 
 ```tsx
 import { Text, useInput, useApp } from 'ink';

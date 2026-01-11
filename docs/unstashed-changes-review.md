@@ -28,14 +28,14 @@ Scope: Review of current unstashed changes for gotchas and dead code.
   - Callers: `src/process.ts:1060`, `src/process-manager.ts:342`
 
 ### 2) Existing sessions report 0 tabs (high)
-`loadProcesses()` does not rebuild `tabIndices`, so `listTabs()` and `mcp-ide up` status are empty or misleading for already-running sessions.
+`loadProcesses()` does not rebuild `tabIndices`, so `listTabs()` and `termos up` status are empty or misleading for already-running sessions.
 
 - `src/process-manager.ts:118` (`listTabs`)
 - `src/process-manager.ts:146` (`loadProcesses`)
 - `src/index.ts:796` (status formatting)
 
 ### 3) `run_interaction` command mode never completes unless protocol output is emitted (high)
-For `mcp-ide run --wait -- <command>`, there is no completion signal unless the command writes the result file or prints `__MCP_RESULT__`. This can hang until timeout.
+For `termos run --wait -- <command>`, there is no completion signal unless the command writes the result file or prints `__MCP_RESULT__`. This can hang until timeout.
 
 - `src/interaction-manager.ts:215` (`create` runner selection)
 - `src/interaction-manager.ts:444` (result detection)

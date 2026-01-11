@@ -1,11 +1,11 @@
 {
-  "name": "mcp-ide",
+  "name": "@termosdev/cli",
   "version": "0.2.0",
   "description": "Interactive Development Environment for Claude Code - manage processes, terminals, and interactive UIs",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "mcp-ide": "dist/index.js"
+    "termos": "dist/index.js"
   },
   "files": [
     "dist",
@@ -43,7 +43,7 @@
   ],
   "license": "MIT",
   "dependencies": {
-    "@mcp-ide/shared": "file:packages/shared",
+    "@termosdev/shared": "file:packages/shared",
     "yaml": "^2.3.4",
     "zod": "^3.22.4"
   },

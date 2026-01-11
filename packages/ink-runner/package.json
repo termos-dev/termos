@@ -1,7 +1,7 @@
 {
-  "name": "@mcp-ide/ink-runner",
+  "name": "@termosdev/ink-runner",
   "version": "0.1.0",
-  "description": "Interactive form runner using Ink for mcp-ide",
+  "description": "Interactive form runner using Ink for termos",
   "type": "module",
   "main": "dist/index.js",
   "bin": {

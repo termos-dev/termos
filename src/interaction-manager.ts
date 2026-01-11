@@ -6,7 +6,7 @@ import { fileURLToPath } from "url";
 import {
   buildInteractionEnv,
   type FormSchema,
-} from "@mcp-ide/shared";
+} from "@termosdev/shared";
 import { findResultEvent } from "./events.js";
 import { getEventsFilePath } from "./tmux-manager.js";
 import type { TmuxManager } from "./tmux-manager.js";
@@ -19,7 +19,7 @@ const __dirname = path.dirname(__filename);
  * Directory name for interactive component files (relative to project root)
  * Files passed to ink_file are resolved relative to this folder
  */
-export const INTERACTIVE_DIR = ".mide/interactive";
+export const INTERACTIVE_DIR = ".termos/interactive";
 
 export type InteractionStatus = "pending" | "completed" | "cancelled" | "timeout";
 export type InteractionAction = "accept" | "decline" | "cancel" | "timeout";
@@ -106,8 +106,8 @@ export class InteractionManager extends EventEmitter {
    * Resolve an ink_file path
    * Resolution order:
    * 1. Absolute paths used as-is
-   * 2. Project .mide/interactive/ (takes precedence)
-   * 3. Global ~/.mide/interactive/
+   * 2. Project .termos/interactive/ (takes precedence)
+   * 3. Global ~/.termos/interactive/
    */
   resolveInkFile(filePath: string): string {
     // Absolute paths used as-is
@@ -115,28 +115,28 @@ export class InteractionManager extends EventEmitter {
       return filePath;
     }
 
-    // Handle paths that already include .mide/interactive/ prefix
-    // This allows both "select.tsx" and ".mide/interactive/select.tsx" to work
+    // Handle paths that already include .termos/interactive/ prefix
+    // This allows both "select.tsx" and ".termos/interactive/select.tsx" to work
     let normalizedPath = filePath;
     const interactivePrefix = INTERACTIVE_DIR + "/";
     if (filePath.startsWith(interactivePrefix)) {
       normalizedPath = filePath.slice(interactivePrefix.length);
     }
 
-    // Try project-local .mide/interactive/ first
+    // Try project-local .termos/interactive/ first
     const projectPath = path.join(this.getInteractiveDir(), normalizedPath);
     if (fs.existsSync(projectPath)) {
       return projectPath;
     }
 
-    // Try CWD-relative path (for .mide/interactive/foo.tsx style paths)
+    // Try CWD-relative path (for .termos/interactive/foo.tsx style paths)
     const cwdRelative = path.join(this.cwd, filePath);
     if (fs.existsSync(cwdRelative)) {
       return cwdRelative;
     }
 
-    // Try global ~/.mide/interactive/
-    const globalPath = path.join(os.homedir(), ".mide", "interactive", normalizedPath);
+    // Try global ~/.termos/interactive/
+    const globalPath = path.join(os.homedir(), ".termos", "interactive", normalizedPath);
     if (fs.existsSync(globalPath)) {
       return globalPath;
     }
@@ -166,7 +166,7 @@ export class InteractionManager extends EventEmitter {
       return cwdPath;
     }
 
-    console.error(`[mide] Warning: ink-runner not found. Expected at: ${distPath}`);
+    console.error(`[termos] Warning: ink-runner not found. Expected at: ${distPath}`);
     return distPath;
   }
 
@@ -198,10 +198,10 @@ export class InteractionManager extends EventEmitter {
       throw new Error("Either schema, inkFile, or command is required");
     }
 
-    // Smart default: .mide/interactive/* and schema forms are ephemeral
+    // Smart default: .termos/interactive/* and schema forms are ephemeral
     // Shell commands are persistent (user may want to see output)
-    const isInteractiveComponent = options.inkFile?.includes('.mide/interactive/') ||
-                                   options.inkFile?.includes('.mide\\interactive\\');
+    const isInteractiveComponent = options.inkFile?.includes('.termos/interactive/') ||
+                                   options.inkFile?.includes('.termos\\interactive\\');
     const ephemeral = !!(isInteractiveComponent || options.schema);
 
     const paneId = await this.tmuxManager.createPane(id, command, process.cwd(), env, {

@@ -60,7 +60,7 @@ function Welcome() {
     };
   }, []);
 
-  const sessionName = args?.sessionName || "mide";
+  const sessionName = args?.sessionName || "termos";
   const tabs = args?.tabs || [];
   const projectInteractive = args?.projectInteractive || [];
   const globalInteractive = args?.globalInteractive || [];
@@ -74,7 +74,7 @@ function Welcome() {
     <Box flexDirection="column" padding={1}>
       {/* Header with status */}
       <Box>
-        <Text bold color="cyan">mide</Text>
+        <Text bold color="cyan">termos</Text>
         <Text dimColor> {sessionName}</Text>
         {status && (
           <>
@@ -97,8 +97,8 @@ function Welcome() {
 
             // Contextual command based on status
             const cmd = svc.status === "running" || svc.status === "ready"
-              ? `mide restart ${svc.name}`
-              : `mide start ${svc.name}`;
+              ? `termos restart ${svc.name}`
+              : `termos start ${svc.name}`;
 
             return (
               <Text key={svc.name}>
@@ -133,7 +133,7 @@ function Welcome() {
             const cmdArgs = INTERACTIVE_CMDS[name] || `--prompt "..."`;
             return (
               <Text key={file}>
-                <Text dimColor>  mide run </Text>
+                <Text dimColor>  termos run </Text>
                 <Text color="yellow">{name}.tsx</Text>
                 <Text dimColor> {cmdArgs}</Text>
               </Text>

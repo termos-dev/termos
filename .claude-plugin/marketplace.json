@@ -1,5 +1,5 @@
 {
-  "name": "claude-ide",
+  "name": "termos",
   "owner": {
     "name": "buremba"
   },
@@ -9,9 +9,9 @@
   },
   "plugins": [
     {
-      "name": "ide",
+      "name": "termos",
       "source": "./",
-      "description": "Interactive Development Environment: create terminal/process panes, show interactive forms and questions, TUI dashboards, manage dev servers from mide.yaml.",
+      "description": "Interactive Development Environment: create terminal/process panes, show interactive forms and questions, TUI dashboards, manage dev servers from termos.yaml.",
       "version": "0.1.0",
       "author": {
         "name": "buremba"

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Wrapper script for mide CLI
+# Wrapper script for termos CLI
 # Uses local build in development, falls back to npx for installed plugin
 
 # Resolve symlinks to get real script location (pwd -P resolves symlinks in path)
@@ -9,5 +9,5 @@ LOCAL_DIST="${SCRIPT_DIR}/../../dist/index.js"
 if [ -f "$LOCAL_DIST" ]; then
     node "$LOCAL_DIST" "$@"
 else
-    npx mcp-ide "$@"
+    npx @termosdev/cli "$@"
 fi

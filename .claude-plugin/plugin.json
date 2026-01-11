@@ -1,5 +1,5 @@
 {
-  "name": "ide",
+  "name": "termos",
   "version": "0.2.0",
   "description": "Interactive Development Environment: terminal panes, interactive forms/questions, process management, TUI dashboards",
   "author": {

@@ -21,7 +21,7 @@ interface WelcomeProps {
  *
  * This component stays running until killed by the system.
  */
-export function Welcome({ sessionName = "mide", tabs = [] }: WelcomeProps) {
+export function Welcome({ sessionName = "termos", tabs = [] }: WelcomeProps) {
   // Separate tabs by type for display
   const serviceTabs = tabs.filter((t) => t.type === "service");
   const layoutTabs = tabs.filter((t) => t.type === "layout");
@@ -29,7 +29,7 @@ export function Welcome({ sessionName = "mide", tabs = [] }: WelcomeProps) {
   return (
     <Box flexDirection="column" padding={1}>
       <Box marginBottom={1}>
-        <Text bold color="cyan">Welcome to mide</Text>
+        <Text bold color="cyan">Welcome to termos</Text>
       </Box>
 
       <Box marginBottom={1}>
@@ -65,13 +65,13 @@ export function Welcome({ sessionName = "mide", tabs = [] }: WelcomeProps) {
 
       {tabs.length === 0 && (
         <Box marginBottom={1}>
-          <Text dimColor>No tabs defined. Add tabs to mide.yaml</Text>
+          <Text dimColor>No tabs defined. Add tabs to termos.yaml</Text>
         </Box>
       )}
 
       <Box marginTop={1} borderStyle="single" borderColor="gray" paddingX={1}>
         <Text dimColor>
-          Create panes: mcp-ide pane {"<name>"} {"<cmd>"}
+          Create panes: termos pane {"<name>"} {"<cmd>"}
         </Text>
       </Box>
     </Box>

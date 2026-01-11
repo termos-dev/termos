@@ -27,7 +27,7 @@ function emitResultEvent(
 }
 
 describe("events", () => {
-  const testDir = path.join(os.tmpdir(), "mide-events-test");
+  const testDir = path.join(os.tmpdir(), "termos-events-test");
   const eventsFile = getEventsFilePath(testDir);
 
   beforeEach(() => {

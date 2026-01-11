@@ -8,4 +8,4 @@ export {
   type FormOption,
   type FormQuestion,
   type FormSchema,
-} from "@mcp-ide/shared";
+} from "@termosdev/shared";
