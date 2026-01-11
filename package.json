@@ -1,6 +1,6 @@
 {
   "name": "@termosdev/cli",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Interactive Development Environment for Claude Code - manage processes, terminals, and interactive UIs",
   "type": "module",
   "main": "dist/index.js",
