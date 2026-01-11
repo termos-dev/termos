@@ -3,7 +3,7 @@ import { Box, Text, useInput, useApp } from "ink";
 import TextInput from "ink-text-input";
 import SelectInput from "ink-select-input";
 import type { FormSchema, FormResult, FormOption } from "../types.js";
-import { emitResultWithFile, emitProgress } from "../types.js";
+import { emitResult } from "../types.js";
 
 interface Props {
   schema: FormSchema;
@@ -31,7 +31,7 @@ export function SchemaForm({ schema, title }: Props) {
   const isMultiSelect = currentQuestion?.multiSelect;
 
   const handleComplete = useCallback((result: FormResult) => {
-    emitResultWithFile(result);  // Writes to file (sync) + stdout
+    emitResult(result);
     exit();
   }, [exit]);
 
@@ -39,13 +39,6 @@ export function SchemaForm({ schema, title }: Props) {
     const key = currentQuestion.header;
     const newAnswers = { ...answers, [key]: value };
     setAnswers(newAnswers);
-
-    // Emit progress after each answer for capture_pane fallback
-    emitProgress({
-      step: currentIndex + 1,
-      total: schema.questions.length,
-      answers: newAnswers,
-    });
 
     if (isLastQuestion) {
       handleComplete({ action: "accept", answers: newAnswers });
@@ -55,7 +48,7 @@ export function SchemaForm({ schema, title }: Props) {
       setMultiSelectState(new Set());
       setMultiSelectCursor(0);
     }
-  }, [answers, currentIndex, currentQuestion, isLastQuestion, handleComplete, schema.questions.length]);
+  }, [answers, currentIndex, currentQuestion, isLastQuestion, handleComplete]);
 
   // Convert options to SelectInput format
   const selectItems: SelectItem[] = currentQuestion?.options?.map((opt: FormOption) => ({
@@ -96,14 +89,15 @@ export function SchemaForm({ schema, title }: Props) {
 
   // Handle text input submission
   const handleTextSubmit = useCallback((value: string) => {
+    const trimmed = value.replace(/[\r\n]+$/, "");  // Strip trailing CR/LF
     if (currentQuestion.validation) {
       const regex = new RegExp(currentQuestion.validation);
-      if (!regex.test(value)) {
+      if (!regex.test(trimmed)) {
         // TODO: Show validation error
         return;
       }
     }
-    saveAndAdvance(value);
+    saveAndAdvance(trimmed);
   }, [currentQuestion, saveAndAdvance]);
 
   // Handle single-select selection

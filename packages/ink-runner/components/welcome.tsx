@@ -3,22 +3,26 @@ import { Box, Text, useInput } from "ink";
 
 declare const args: {
   sessionName?: string;
-  services?: Array<{
+  tabs?: Array<{
     name: string;
     windowIndex: number;
-    status: string;
-    restartCount: number;
+    type: string;
+    status?: string;
+    restartCount?: number;
     port?: number;
     healthy?: boolean;
   }>;
-  projectInteractive?: string[];  // .mide/interactive/
-  globalInteractive?: string[];   // ~/.mide/interactions/
+  projectInteractive?: string[];
+  globalInteractive?: string[];
+  status?: string;
+  prompts?: string[];
 };
 
 const STATUS_COLORS: Record<string, string> = {
   running: "green",
   ready: "green",
   starting: "yellow",
+  pending: "gray",
   stopped: "gray",
   crashed: "red",
   completed: "cyan",
@@ -28,27 +32,24 @@ const STATUS_ICONS: Record<string, string> = {
   running: "●",
   ready: "●",
   starting: "◐",
+  pending: "○",
   stopped: "○",
   crashed: "✗",
   completed: "✓",
 };
 
-// Example prompts for each interactive component
-const INTERACTIVE_EXAMPLES: Record<string, string> = {
-  "confirm": "Ask the user to confirm before deploying",
-  "select": "Let the user pick which environment to deploy to",
-  "multi-select": "Ask user which features to enable",
-  "text-input": "Get the user's API key",
-  "number-input": "Ask user how many replicas to create",
-  "color-picker": "Let user choose a theme color",
-  "auto-complete": "Help user select a file from suggestions",
+// Command examples for interactive components
+const INTERACTIVE_CMDS: Record<string, string> = {
+  "confirm": '--prompt "Continue?"',
+  "select": '--prompt "Pick" --options "a,b,c"',
+  "multi-select": '--prompt "Select" --options "x,y,z"',
+  "text-input": '--prompt "Enter value"',
+  "color-picker": '--prompt "Pick color"',
 };
 
 function Welcome() {
-  // Ignore all input - this component should never exit
   useInput(() => {});
 
-  // Ignore SIGINT/SIGTERM
   useEffect(() => {
     const ignore = () => {};
     process.on("SIGINT", ignore);
@@ -60,32 +61,51 @@ function Welcome() {
   }, []);
 
   const sessionName = args?.sessionName || "mide";
-  const services = args?.services || [];
+  const tabs = args?.tabs || [];
   const projectInteractive = args?.projectInteractive || [];
   const globalInteractive = args?.globalInteractive || [];
+  const status = args?.status;
+  const prompts = args?.prompts || [];
+
+  // Get service tabs only (not layout tabs)
+  const services = tabs.filter(t => t.type === "service");
 
   return (
     <Box flexDirection="column" padding={1}>
-      <Text bold color="cyan">mide</Text>
-      <Text dimColor>Session: {sessionName}</Text>
+      {/* Header with status */}
+      <Box>
+        <Text bold color="cyan">mide</Text>
+        <Text dimColor> {sessionName}</Text>
+        {status && (
+          <>
+            <Text dimColor>  </Text>
+            <Text color="yellow">⚡ {status}</Text>
+          </>
+        )}
+      </Box>
       <Text> </Text>
 
+      {/* Services list with contextual commands */}
       {services.length > 0 && (
         <>
           <Text bold>Services</Text>
           {services.map((svc) => {
-            const color = STATUS_COLORS[svc.status] || "white";
-            const icon = STATUS_ICONS[svc.status] || "?";
+            const color = STATUS_COLORS[svc.status || "stopped"] || "white";
+            const icon = STATUS_ICONS[svc.status || "stopped"] || "?";
             const portInfo = svc.port ? `:${svc.port}` : "";
-            const restartInfo = svc.restartCount > 0 ? ` (${svc.restartCount}x)` : "";
+            const restartInfo = (svc.restartCount ?? 0) > 0 ? ` (${svc.restartCount}x)` : "";
+
+            // Contextual command based on status
+            const cmd = svc.status === "running" || svc.status === "ready"
+              ? `mide restart ${svc.name}`
+              : `mide start ${svc.name}`;
 
             return (
               <Text key={svc.name}>
-                <Text color="yellow">{svc.windowIndex}</Text>
-                <Text dimColor> </Text>
                 <Text color={color}>{icon}</Text>
                 <Text> {svc.name}</Text>
                 <Text dimColor>{portInfo}{restartInfo}</Text>
+                <Text dimColor>  {cmd}</Text>
               </Text>
             );
           })}
@@ -93,50 +113,44 @@ function Welcome() {
         </>
       )}
 
-      <Text bold>Service Commands</Text>
-      <Text dimColor>Ask Claude to manage your dev environment:</Text>
-      <Text color="green">  "Start the API server"</Text>
-      <Text color="green">  "Show me the logs for redis"</Text>
-      <Text color="green">  "Restart the frontend"</Text>
+      {/* Suggested prompts from LLM (if any) */}
+      {prompts.length > 0 && (
+        <>
+          <Text bold>Suggested Next Steps</Text>
+          {prompts.map((prompt, i) => (
+            <Text key={i} color="green">  "{prompt}"</Text>
+          ))}
+          <Text> </Text>
+        </>
+      )}
+
+      {/* Interactive components */}
+      {(projectInteractive.length > 0 || globalInteractive.length > 0) && (
+        <>
+          <Text bold>Interactive Components</Text>
+          {[...projectInteractive, ...globalInteractive].slice(0, 4).map((file) => {
+            const name = file.replace('.tsx', '');
+            const cmdArgs = INTERACTIVE_CMDS[name] || `--prompt "..."`;
+            return (
+              <Text key={file}>
+                <Text dimColor>  mide run </Text>
+                <Text color="yellow">{name}.tsx</Text>
+                <Text dimColor> {cmdArgs}</Text>
+              </Text>
+            );
+          })}
+          <Text> </Text>
+        </>
+      )}
+
+      {/* Navigation help */}
+      <Text bold>Navigation</Text>
+      <Text><Text dimColor>Ctrl-b</Text> <Text color="yellow">0-9</Text> <Text dimColor>Switch tabs</Text></Text>
+      <Text><Text dimColor>Ctrl-b</Text> <Text color="yellow">d</Text> <Text dimColor>  Detach</Text></Text>
       <Text> </Text>
 
-      {projectInteractive.length > 0 && (
-        <>
-          <Text bold>Project Interactive <Text dimColor>(.mide/interactive/)</Text></Text>
-          {projectInteractive.map((file) => {
-            const name = file.replace('.tsx', '');
-            const example = INTERACTIVE_EXAMPLES[name] || `Use ${name} component`;
-            return (
-              <Text key={file}>
-                <Text color="yellow">  {name.padEnd(14)}</Text>
-                <Text dimColor>"{example}"</Text>
-              </Text>
-            );
-          })}
-          <Text> </Text>
-        </>
-      )}
-
-      {globalInteractive.length > 0 && (
-        <>
-          <Text bold>Global Interactive <Text dimColor>(~/.mide/interactions/)</Text></Text>
-          {globalInteractive.map((file) => {
-            const name = file.replace('.tsx', '');
-            const example = INTERACTIVE_EXAMPLES[name] || `Use ${name} component`;
-            return (
-              <Text key={file}>
-                <Text color="yellow">  {name.padEnd(14)}</Text>
-                <Text dimColor>"{example}"</Text>
-              </Text>
-            );
-          })}
-          <Text> </Text>
-        </>
-      )}
-
-      <Text bold>Navigation</Text>
-      <Text><Text dimColor>Ctrl-b</Text> <Text color="yellow">0-9</Text> <Text dimColor>Switch windows</Text></Text>
-      <Text><Text dimColor>Ctrl-b</Text> <Text color="yellow">d</Text> <Text dimColor>  Detach session</Text></Text>
+      {/* Tip */}
+      <Text dimColor>Tip: Ask Claude to explain code, ask you questions, or suggest next steps.</Text>
     </Box>
   );
 }

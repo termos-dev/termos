@@ -16,31 +16,32 @@ const execFileAsync = promisify(execFile);
 
 /**
  * Get the log directory for a session
- * sessionName already has "mide-" prefix from TmuxManager
+ * Uses .mide/ in the config directory
  */
-export function getSessionLogDir(sessionName: string): string {
-  return `/tmp/${sessionName}`;
+export function getSessionLogDir(configDir: string): string {
+  return path.join(configDir, ".mide");
 }
 
 /**
  * Get the log file path for a service
  */
-export function getServiceLogPath(sessionName: string, serviceName: string): string {
-  return path.join(getSessionLogDir(sessionName), `${serviceName}.log`);
+export function getServiceLogPath(configDir: string, serviceName: string): string {
+  return path.join(getSessionLogDir(configDir), `${serviceName}.log`);
 }
 
 /**
  * Get the events file path for a session
  */
-export function getEventsFilePath(sessionName: string): string {
-  return path.join(getSessionLogDir(sessionName), "events.jsonl");
+export function getEventsFilePath(configDir: string): string {
+  return path.join(getSessionLogDir(configDir), "events.jsonl");
 }
 
 /**
- * Get the owner file path for a session
+ * Get the owner file path (~/.mide/sessions/<session>)
  */
 function getOwnerFilePath(sessionName: string): string {
-  return path.join(getSessionLogDir(sessionName), ".owner");
+  const home = process.env.HOME || process.env.USERPROFILE || "";
+  return path.join(home, ".mide", "sessions", sessionName);
 }
 
 /**
@@ -49,9 +50,10 @@ function getOwnerFilePath(sessionName: string): string {
 function writeOwnerPid(sessionName: string): void {
   const ownerFile = getOwnerFilePath(sessionName);
   try {
+    fs.mkdirSync(path.dirname(ownerFile), { recursive: true });
     fs.writeFileSync(ownerFile, String(process.pid));
   } catch {
-    // Ignore - directory might not exist yet
+    // Ignore
   }
 }
 
@@ -90,13 +92,12 @@ function isPidRunning(pid: number): boolean {
 export function isSessionStale(sessionName: string): boolean {
   const ownerPid = readOwnerPid(sessionName);
   if (ownerPid === null) {
-    // No owner file - could be old session, check log directory age
-    const logDir = getSessionLogDir(sessionName);
+    // No owner file - check owner file age
+    const ownerFile = getOwnerFilePath(sessionName);
     try {
-      if (fs.existsSync(logDir)) {
-        const stats = fs.statSync(logDir);
+      if (fs.existsSync(ownerFile)) {
+        const stats = fs.statSync(ownerFile);
         const ageMs = Date.now() - stats.mtimeMs;
-        // Consider sessions older than 5 minutes without owner file as stale
         return ageMs > 5 * 60 * 1000;
       }
     } catch {
@@ -104,12 +105,11 @@ export function isSessionStale(sessionName: string): boolean {
     }
     return false;
   }
-  // Session is stale if owner PID is not running
   return !isPidRunning(ownerPid);
 }
 
 /**
- * Clean up a stale session (kill tmux session and remove logs)
+ * Clean up a stale session (kill tmux session and remove owner file)
  */
 export async function cleanupStaleSession(sessionName: string): Promise<void> {
   console.error(`[mide] Cleaning up stale session: ${sessionName}`);
@@ -118,22 +118,13 @@ export async function cleanupStaleSession(sessionName: string): Promise<void> {
   } catch {
     // Session may already be gone
   }
-  const logDir = getSessionLogDir(sessionName);
+  // Remove owner file
   try {
-    fs.rmSync(logDir, { recursive: true, force: true });
+    fs.unlinkSync(getOwnerFilePath(sessionName));
   } catch {
-    // Ignore cleanup errors
+    // Ignore
   }
 }
-
-export type IdeStatus = "pending" | "running" | "completed" | "failed";
-
-const STATUS_ICONS: Record<IdeStatus, string> = {
-  pending: "⏳",
-  running: "🔄",
-  completed: "✅",
-  failed: "❌",
-};
 
 /**
  * Check if we're running inside a tmux session
@@ -149,20 +140,10 @@ export interface PaneInfo {
   exitStatus?: number;
 }
 
+export type TmuxMode = "owned" | "embedded";
+
 export interface TmuxManagerOptions {
   sessionPrefix?: string;
-}
-
-/**
- * Check if tmux is available on the system
- */
-export async function isTmuxAvailable(): Promise<boolean> {
-  try {
-    await execFileAsync("which", ["tmux"]);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 /**
@@ -230,327 +211,102 @@ export async function getCurrentTmuxSession(): Promise<string | null> {
 }
 
 /**
- * Manages panes in the user's current tmux session (embedded mode)
- * Used when claude-ide is running inside an existing tmux session
+ * Manages a tmux session for process orchestration
+ * Supports two modes:
+ * - "owned": Creates and manages a dedicated session (use createOwned)
+ * - "embedded": Works within an existing tmux session (use createEmbedded)
  */
-export class EmbeddedTmuxManager {
-  private paneMap = new Map<string, string>(); // name -> paneId
-  private sessionName: string;
-  private sourcePaneId: string; // The pane where Claude is running
+export class TmuxManager {
+  readonly sessionName: string;
+  readonly configDir: string;
+  readonly mode: TmuxMode;
+  private paneMap = new Map<string, string>();
+  private sourcePaneId?: string; // For embedded mode: the pane where Claude is running
 
-  private constructor(sessionName: string, sourcePaneId: string) {
+  private constructor(
+    sessionName: string,
+    options: { configDir?: string; mode?: TmuxMode; sourcePaneId?: string } = {}
+  ) {
     this.sessionName = sessionName;
-    this.sourcePaneId = sourcePaneId;
+    this.configDir = options.configDir ?? process.cwd();
+    this.mode = options.mode ?? "owned";
+    this.sourcePaneId = options.sourcePaneId;
   }
 
-  /**
-   * Create an EmbeddedTmuxManager (async factory)
-   */
-  static async create(): Promise<EmbeddedTmuxManager> {
+  /** Create a TmuxManager that owns a dedicated session */
+  static createOwned(projectName: string, options: TmuxManagerOptions = {}, configDir?: string): TmuxManager {
+    const prefix = options.sessionPrefix ?? "mide";
+    const sessionName = `${prefix}-${projectName.replace(/[^a-zA-Z0-9_-]/g, "-").toLowerCase()}`;
+    return new TmuxManager(sessionName, { configDir, mode: "owned" });
+  }
+
+  /** Create a TmuxManager embedded in the current tmux session */
+  static async createEmbedded(): Promise<TmuxManager> {
     const session = await getCurrentTmuxSession();
     if (!session) {
-      throw new Error("EmbeddedTmuxManager requires running inside tmux");
+      throw new Error("createEmbedded requires running inside tmux");
     }
 
-    // Use $TMUX_PANE - this is the pane ID where Claude is running
     let sourcePaneId = process.env.TMUX_PANE || "";
-
-    // Fallback: if TMUX_PANE not set, get the active pane of the current window
     if (!sourcePaneId) {
       try {
-        // Get the active pane ID from the session's current window
         const { stdout } = await execFileAsync("tmux", [
           "display-message", "-t", session, "-p", "#{pane_id}"
         ]);
         sourcePaneId = stdout.trim();
-        if (sourcePaneId) {
-          console.error(`[mide] Embedded mode: session=${session}, sourcePaneId=${sourcePaneId} (fallback via display-message)`);
-        }
       } catch {
         console.error(`[mide] Warning: Could not get active pane for session ${session}`);
       }
-    } else {
-      console.error(`[mide] Embedded mode: session=${session}, sourcePaneId=${sourcePaneId}`);
     }
+    console.error(`[mide] Embedded mode: session=${session}, sourcePaneId=${sourcePaneId}`);
 
-    return new EmbeddedTmuxManager(session, sourcePaneId);
+    return new TmuxManager(session, { mode: "embedded", sourcePaneId });
   }
 
-  /**
-   * Get the session name
-   */
-  getSessionName(): string {
-    return this.sessionName;
+  /** Get .mide directory path */
+  getLogDir(): string {
+    return getSessionLogDir(this.configDir);
   }
 
-  /**
-   * Get the dimensions of the source pane (where Claude is running)
-   * Used for smart "auto" direction detection
-   */
-  private async getPaneDimensions(): Promise<{ width: number; height: number }> {
-    const target = this.sourcePaneId || "";
-    const args = target
-      ? ["display-message", "-t", target, "-p", "#{pane_width} #{pane_height}"]
-      : ["display-message", "-p", "#{pane_width} #{pane_height}"];
-
-    const { stdout } = await execFileAsync("tmux", args);
-    const [widthStr, heightStr] = stdout.trim().split(" ");
-    return {
-      width: parseInt(widthStr, 10) || 80,
-      height: parseInt(heightStr, 10) || 24,
-    };
+  /** Get events file path */
+  getEventsFile(): string {
+    return getEventsFilePath(this.configDir);
   }
 
-  /**
-   * Create a new pane with split in the current window
-   * @param name - Unique name for the pane
-   * @param command - Command to run in the pane
-   * @param cwd - Working directory
-   * @param env - Environment variables to set
-   * @param options - Split options: direction ('auto' | 'right' | 'left' | 'top' | 'bottom'), skipRebalance
-   */
-  async createPane(
-    name: string,
-    command: string,
-    cwd: string,
-    env?: Record<string, string>,
-    options?: { direction?: "auto" | "right" | "left" | "top" | "bottom"; skipRebalance?: boolean }
-  ): Promise<string> {
-    if (this.paneMap.has(name)) {
-      throw new Error(`Pane "${name}" already exists`);
-    }
-
-    // Resolve "auto" direction based on pane dimensions
-    let direction: "right" | "left" | "top" | "bottom" = "right";
-    const requestedDirection = options?.direction ?? "auto";
-
-    if (requestedDirection === "auto") {
-      // Smart detection: split along the longer axis
-      const { width, height } = await this.getPaneDimensions();
-      direction = width >= height ? "right" : "bottom";
-      console.error(`[mide] Auto-detected split direction: ${direction} (pane: ${width}x${height})`);
-    } else {
-      direction = requestedDirection;
-    }
-    const skipRebalance = options?.skipRebalance ?? false;
-
-    // Build environment exports for custom vars
-    let envExports = "";
-    if (env) {
-      const customVars: string[] = [];
-      for (const [key, value] of Object.entries(env)) {
-        // Only export custom vars not already in system env
-        if (!process.env[key]) {
-          customVars.push(`export ${key}=${this.shellEscape(value)}`);
-        }
-      }
-      if (customVars.length > 0) {
-        envExports = customVars.join("; ") + "; ";
-      }
-    }
-
-    const shellCommand = `cd ${this.shellEscape(cwd)} && ${envExports}${command}`;
-
-    // Build split-window args
-    const args = ["split-window"];
-
-    // Target Claude's pane directly if we have it
-    if (this.sourcePaneId) {
-      args.push("-t", this.sourcePaneId);
-    }
-
-    // Direction flags:
-    // -h = horizontal split, -v = vertical split
-    // -b = before (left/top instead of right/bottom)
-    switch (direction) {
-      case "right":
-        args.push("-h");
-        break;
-      case "left":
-        args.push("-h", "-b");
-        break;
-      case "bottom":
-        args.push("-v");
-        break;
-      case "top":
-        args.push("-v", "-b");
-        break;
-    }
-
-    args.push(
-      "-P",           // Print pane info
-      "-F", "#{pane_id}",
-      "-c", cwd,
-      "sh", "-c", shellCommand
-    );
-
-    const { stdout } = await execFileAsync("tmux", args);
-    const paneId = stdout.trim();
-    this.paneMap.set(name, paneId);
-
-    // Re-balance layout so all panes are evenly distributed (unless skipped)
-    if (!skipRebalance) {
-      try {
-        if (this.sourcePaneId) {
-          await execFileAsync("tmux", ["select-layout", "-t", this.sourcePaneId, "tiled"]);
-        } else {
-          await execFileAsync("tmux", ["select-layout", "tiled"]);
-        }
-      } catch {
-        // Layout change might fail, that's ok
-      }
-    }
-
-    console.error(`[mide] Created embedded pane: ${name} (${paneId})`);
-    return paneId;
+  /** Get service log file path */
+  getServiceLog(serviceName: string): string {
+    return getServiceLogPath(this.configDir, serviceName);
   }
 
-  /**
-   * Kill a pane by name
-   */
-  async killPane(name: string): Promise<void> {
-    const paneId = this.paneMap.get(name);
-    if (!paneId) return;
-
-    try {
-      await execFileAsync("tmux", ["kill-pane", "-t", paneId]);
-    } catch {
-      // Pane might already be gone
-    }
-    this.paneMap.delete(name);
-  }
-
-  /**
-   * Get pane ID by name
-   */
-  getPaneId(name: string): string | undefined {
-    return this.paneMap.get(name);
-  }
-
-  /**
-   * Check if a pane exists
-   */
-  hasPane(name: string): boolean {
-    return this.paneMap.has(name);
-  }
-
-  /**
-   * Check if a pane exists (async version for TmuxManager compatibility)
-   */
-  async paneExists(name: string): Promise<boolean> {
-    return this.paneMap.has(name);
-  }
-
-  /**
-   * Capture pane output (alias for getPaneLogs for TmuxManager compatibility)
-   */
-  async capturePane(name: string, lines = 100): Promise<string> {
-    return this.getPaneLogs(name, lines);
-  }
-
-  /**
-   * Set the status (updates current window title)
-   */
-  async setStatus(status: IdeStatus, message?: string): Promise<void> {
-    const icon = STATUS_ICONS[status];
-    const title = message
-      ? `${icon} MIDE: ${message}`
-      : `${icon} MIDE`;
-
-    try {
-      await execFileAsync("tmux", ["rename-window", title]);
-    } catch (err) {
-      console.error(`[mide] Failed to set status: ${err}`);
-    }
-  }
-
-  /**
-   * Get logs from a pane
-   */
-  async getPaneLogs(name: string, lines = 100): Promise<string> {
-    const paneId = this.paneMap.get(name);
-    if (!paneId) return "";
-
-    try {
-      const { stdout } = await execFileAsync("tmux", [
-        "capture-pane",
-        "-t", paneId,
-        "-p",           // Print to stdout
-        "-S", `-${lines}`,  // Start from N lines back
-      ]);
-      return stdout;
-    } catch {
-      return "";
-    }
-  }
-
-  /**
-   * Send keys to a pane
-   */
-  async sendKeys(paneIdOrName: string, keys: string): Promise<void> {
-    const paneId = this.paneMap.get(paneIdOrName) ?? paneIdOrName;
-    await execFileAsync("tmux", ["send-keys", "-t", paneId, keys, "Enter"]);
-  }
-
-  /**
-   * Stop all panes
-   */
-  async stopAll(): Promise<void> {
-    for (const [name] of this.paneMap) {
-      await this.killPane(name);
-    }
-  }
-
-  private shellEscape(str: string): string {
-    return `'${str.replace(/'/g, "'\\''")}'`;
-  }
-}
-
-/**
- * Manages a tmux session for process orchestration
- */
-export class TmuxManager {
-  readonly sessionName: string;
-  private paneMap = new Map<string, string>(); // processName -> paneId
-
-  constructor(projectName: string, options: TmuxManagerOptions = {}) {
-    const prefix = options.sessionPrefix ?? "mide";
-    this.sessionName = `${prefix}-${this.sanitizeName(projectName)}`;
-  }
-
-  /**
-   * Register a pane in the pane map
-   */
+  /** Register a pane in the pane map */
   registerPane(name: string, paneId: string): void {
     this.paneMap.set(name, paneId);
   }
 
-  /**
-   * Unregister a pane from the pane map
-   */
+  /** Unregister a pane from the pane map */
   unregisterPane(name: string): void {
     this.paneMap.delete(name);
   }
 
-  /**
-   * Get pane ID by name
-   */
+  /** Get pane ID by name */
   getPaneId(name: string): string | undefined {
     return this.paneMap.get(name);
   }
 
-  /**
-   * Check if a pane exists
-   */
+  /** Check if a pane exists */
   hasPane(name: string): boolean {
     return this.paneMap.has(name);
   }
 
-  /**
-   * Sanitize project name for use in tmux session name
-   */
-  private sanitizeName(name: string): string {
-    return name.replace(/[^a-zA-Z0-9_-]/g, "-").toLowerCase();
+  /** Get pane dimensions (for auto direction) */
+  private async getPaneDimensions(target?: string): Promise<{ width: number; height: number }> {
+    const t = target || this.sourcePaneId || "";
+    const args = t
+      ? ["display-message", "-t", t, "-p", "#{pane_width} #{pane_height}"]
+      : ["display-message", "-p", "#{pane_width} #{pane_height}"];
+    const { stdout } = await execFileAsync("tmux", args);
+    const [w, h] = stdout.trim().split(" ");
+    return { width: parseInt(w, 10) || 80, height: parseInt(h, 10) || 24 };
   }
 
   /**
@@ -581,6 +337,28 @@ export class TmuxManager {
           // Update pane map
           this.paneMap.set(windowName, paneId);
           return paneId;
+        }
+      }
+      return undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Get window index for an existing window by name
+   * Returns undefined if window doesn't exist
+   */
+  async findWindowIndex(windowName: string): Promise<number | undefined> {
+    try {
+      const { stdout } = await execFileAsync("tmux", [
+        "list-windows", "-t", this.sessionName, "-F", "#{window_name}:#{window_index}"
+      ]);
+      const lines = stdout.trim().split("\n");
+      for (const line of lines) {
+        const [name, indexStr] = line.split(":");
+        if (name === windowName) {
+          return parseInt(indexStr, 10);
         }
       }
       return undefined;
@@ -626,8 +404,9 @@ export class TmuxManager {
       const lines = stdout.trim().split("\n");
       for (const line of lines) {
         const [name, indexStr] = line.split(":");
-        if (name && indexStr) {
-          result.set(name, parseInt(indexStr, 10));
+        const index = parseInt(indexStr, 10);
+        if (name && !Number.isNaN(index)) {
+          result.set(name, index);
         }
       }
     } catch {
@@ -749,13 +528,18 @@ export class TmuxManager {
       (this as { sessionName: string }).sessionName = finalName;
     }
 
-    // Create log directory for this session
-    const logDir = getSessionLogDir(finalName);
+    // Create .mide directory for logs
+    const logDir = this.getLogDir();
     fs.mkdirSync(logDir, { recursive: true });
 
+    // Create .gitignore to exclude runtime files from version control
+    const gitignorePath = path.join(logDir, ".gitignore");
+    if (!fs.existsSync(gitignorePath)) {
+      fs.writeFileSync(gitignorePath, "# MIDE runtime data - auto-generated\n*\n!.gitignore\n");
+    }
+
     // Initialize empty events file
-    const eventsFile = getEventsFilePath(finalName);
-    fs.writeFileSync(eventsFile, "", { flag: "w" });
+    fs.writeFileSync(this.getEventsFile(), "", { flag: "w" });
 
     // Write owner PID for stale session detection
     writeOwnerPid(finalName);
@@ -774,12 +558,33 @@ export class TmuxManager {
     }
     this.paneMap.clear();
 
-    // Clean up log directory
-    const logDir = getSessionLogDir(this.sessionName);
+    // Remove owner file
     try {
-      fs.rmSync(logDir, { recursive: true, force: true });
+      fs.unlinkSync(getOwnerFilePath(this.sessionName));
     } catch {
-      // Ignore cleanup errors
+      // Ignore
+    }
+  }
+
+  /**
+   * Set the session title (shown in tmux status bar)
+   */
+  async setSessionTitle(title: string): Promise<void> {
+    try {
+      await execFileAsync("tmux", ["rename-session", "-t", this.sessionName, title]);
+    } catch {
+      // Ignore errors (session may not exist)
+    }
+  }
+
+  /**
+   * Select a window by index (makes it active for next attach)
+   */
+  async selectWindow(index: number): Promise<void> {
+    try {
+      await execFileAsync("tmux", ["select-window", "-t", `${this.sessionName}:${index}`]);
+    } catch {
+      // Ignore errors (window may not exist)
     }
   }
 
@@ -795,6 +600,22 @@ export class TmuxManager {
     cwd: string,
     env?: Record<string, string>
   ): Promise<string> {
+    // Check if window already exists - reuse it instead of creating duplicate
+    const existingPaneId = await this.getWindowPaneId(serviceName);
+    if (existingPaneId) {
+      // Respawn the existing pane with new command
+      const envParts = env
+        ? Object.entries(env)
+            .filter(([k]) => k === "PORT" || !process.env[k])
+            .map(([k, v]) => `export ${k}=${this.shellEscape(v)}`)
+        : [];
+      const envExports = envParts.length > 0 ? envParts.join("; ") + "; " : "";
+      const shellCommand = `cd ${this.shellEscape(cwd)} && ${envExports}${command}`;
+      await execFileAsync("tmux", ["respawn-pane", "-t", existingPaneId, "-k", "sh", "-c", shellCommand]);
+      this.paneMap.set(serviceName, existingPaneId);
+      return existingPaneId;
+    }
+
     // Build environment exports
     let envExports = "";
     if (env) {
@@ -835,7 +656,7 @@ export class TmuxManager {
     }
 
     // Set up pipe-pane to redirect output to log file
-    const logFile = getServiceLogPath(this.sessionName, serviceName);
+    const logFile = this.getServiceLog(serviceName);
     try {
       await execFileAsync("tmux", [
         "pipe-pane",
@@ -862,6 +683,12 @@ export class TmuxManager {
   ): Promise<number> {
     if (layout.length === 0) {
       throw new Error(`Layout tab "${tabName}" has no panes defined`);
+    }
+
+    // Check if window already exists - return its index instead of creating duplicate
+    const existingIndex = await this.findWindowIndex(tabName);
+    if (existingIndex !== undefined) {
+      return existingIndex;
     }
 
     const isNested = isDashboardNested(layout);
@@ -1066,118 +893,110 @@ export class TmuxManager {
   }
 
   /**
-   * Create a new pane for a process
-   * Returns the pane ID
+   * Create a new pane
+   * Unified method for all pane creation scenarios:
+   * - Embedded mode: splits from sourcePaneId
+   * - targetWindow: splits in specific window (e.g., 0 for dashboard)
+   * - Default (owned mode): respawns first pane if empty, else splits session
    */
   async createPane(
-    processName: string,
-    command: string,
-    cwd: string,
-    env?: Record<string, string>,
-    _options?: { direction?: "right" | "left" | "top" | "bottom"; skipRebalance?: boolean }
-  ): Promise<string> {
-    // Build environment exports for only custom/process-specific vars
-    let envExports = "";
-    if (env) {
-      const customVars: string[] = [];
-      for (const [key, value] of Object.entries(env)) {
-        // Only export PORT and custom vars not already in system env
-        if (key === "PORT" || !process.env[key]) {
-          customVars.push(`export ${key}=${this.shellEscape(value)}`);
-        }
-      }
-      if (customVars.length > 0) {
-        envExports = customVars.join("; ") + "; ";
-      }
-    }
-
-    // Build the shell command
-    const shellCommand = `cd ${this.shellEscape(cwd)} && ${envExports}${command}`;
-
-    // Check if this is the first pane (use existing placeholder) or need to split
-    const panes = await this.listPanes();
-    let paneId: string;
-
-    if (panes.length === 1 && !this.paneMap.size) {
-      // First process - respawn the existing pane with our command
-      paneId = panes[0].paneId;
-      await execFileAsync("tmux", [
-        "respawn-pane",
-        "-t",
-        paneId,
-        "-k",  // Kill any existing process
-        "sh", "-c", shellCommand,
-      ]);
-    } else {
-      // Split and rebalance
-      const { stdout } = await execFileAsync("tmux", [
-        "split-window",
-        "-t",
-        this.sessionName,
-        "-P",
-        "-F",
-        "#{pane_id}",
-        "-c", cwd,
-        "sh", "-c", shellCommand,
-      ]);
-      paneId = stdout.trim();
-
-      // Rebalance with tiled layout
-      await this.applyLayout();
-    }
-
-    this.paneMap.set(processName, paneId);
-    return paneId;
-  }
-
-  /**
-   * Create a dynamic pane in window 0
-   * Used for dynamically created terminals
-   */
-  async createDynamicPane(
     name: string,
     command: string,
     cwd: string,
-    _groupName: string,
-    env?: Record<string, string>
+    env?: Record<string, string>,
+    options?: {
+      direction?: "auto" | "right" | "left" | "top" | "bottom";
+      skipRebalance?: boolean;
+      targetWindow?: number;
+      setTitle?: boolean;
+    }
   ): Promise<string> {
+    if (this.paneMap.has(name)) {
+      throw new Error(`Pane "${name}" already exists`);
+    }
+
     // Build environment exports
     let envExports = "";
     if (env) {
-      const customVars: string[] = [];
-      for (const [key, value] of Object.entries(env)) {
-        if (key === "PORT" || !process.env[key]) {
-          customVars.push(`export ${key}=${this.shellEscape(value)}`);
-        }
-      }
-      if (customVars.length > 0) {
-        envExports = customVars.join("; ") + "; ";
-      }
+      const customVars = Object.entries(env)
+        .filter(([k]) => k === "PORT" || !process.env[k])
+        .map(([k, v]) => `export ${k}=${this.shellEscape(v)}`);
+      if (customVars.length > 0) envExports = customVars.join("; ") + "; ";
     }
 
     const shellCommand = `cd ${this.shellEscape(cwd)} && ${envExports}${command}`;
+    let paneId: string;
 
-    // Always create dynamic panes in window 0 (mide/dashboard window)
-    // This keeps the architecture simple: services = windows, interactions = panes in window 0
-    const { stdout } = await execFileAsync("tmux", [
-      "split-window",
-      "-t", `${this.sessionName}:0`,  // Target window 0 (mide)
-      "-h",                            // Horizontal split (right side)
-      "-P",
-      "-F", "#{pane_id}",
-      "-c", cwd,
-      "sh", "-c", shellCommand,
-    ]);
-    const paneId = stdout.trim();
+    // Determine target and strategy
+    if (this.mode === "embedded" && this.sourcePaneId) {
+      // Embedded mode: split from source pane with direction
+      paneId = await this.splitWithDirection(shellCommand, cwd, this.sourcePaneId, options);
+    } else if (options?.targetWindow !== undefined) {
+      // Target specific window (e.g., window 0 for dynamic panes)
+      paneId = await this.splitWithDirection(shellCommand, cwd, `${this.sessionName}:${options.targetWindow}`, options);
+    } else {
+      // Owned mode: respawn first pane if empty, else split session
+      const panes = await this.listPanes();
+      if (panes.length === 1 && !this.paneMap.size) {
+        paneId = panes[0].paneId;
+        await execFileAsync("tmux", ["respawn-pane", "-t", paneId, "-k", "sh", "-c", shellCommand]);
+      } else {
+        const { stdout } = await execFileAsync("tmux", [
+          "split-window", "-t", this.sessionName, "-P", "-F", "#{pane_id}", "-c", cwd, "sh", "-c", shellCommand,
+        ]);
+        paneId = stdout.trim();
+        if (!options?.skipRebalance) await this.applyLayout();
+      }
+    }
 
-    // Set pane title for recovery on reconnect
-    try {
-      await execFileAsync("tmux", ["select-pane", "-t", paneId, "-T", name]);
-    } catch {
-      // Non-fatal if title can't be set
+    // Set pane title if requested
+    if (options?.setTitle) {
+      try {
+        await execFileAsync("tmux", ["select-pane", "-t", paneId, "-T", name]);
+      } catch { /* non-fatal */ }
     }
 
     this.paneMap.set(name, paneId);
+    return paneId;
+  }
+
+  /** Helper: split with direction support */
+  private async splitWithDirection(
+    shellCommand: string,
+    cwd: string,
+    target: string,
+    options?: { direction?: "auto" | "right" | "left" | "top" | "bottom"; skipRebalance?: boolean }
+  ): Promise<string> {
+    // Resolve direction
+    let direction: "right" | "left" | "top" | "bottom" = "right";
+    const requested = options?.direction ?? "auto";
+    if (requested === "auto") {
+      const { width, height } = await this.getPaneDimensions(target);
+      direction = width >= height ? "right" : "bottom";
+    } else {
+      direction = requested;
+    }
+
+    // Build args
+    const args = ["split-window", "-t", target];
+    switch (direction) {
+      case "right": args.push("-h"); break;
+      case "left": args.push("-h", "-b"); break;
+      case "bottom": args.push("-v"); break;
+      case "top": args.push("-v", "-b"); break;
+    }
+    args.push("-P", "-F", "#{pane_id}", "-c", cwd, "sh", "-c", shellCommand);
+
+    const { stdout } = await execFileAsync("tmux", args);
+    const paneId = stdout.trim();
+
+    // Rebalance unless skipped
+    if (!options?.skipRebalance) {
+      try {
+        await execFileAsync("tmux", ["select-layout", "-t", target, "tiled"]);
+      } catch { /* might fail */ }
+    }
+
     return paneId;
   }
 
@@ -1330,7 +1149,7 @@ export class TmuxManager {
         "-t",
         paneId,
         "-k", // Kill any existing process
-        fullCommand,
+        "sh", "-c", fullCommand,
       ]);
     } catch {
       // If respawn fails, send keys instead
@@ -1404,26 +1223,6 @@ export class TmuxManager {
   private async runTmux(args: string[]): Promise<string> {
     const { stdout } = await execFileAsync("tmux", args);
     return stdout;
-  }
-
-  /**
-   * Set the MIDE status displayed in the terminal window title
-   */
-  async setStatus(status: IdeStatus, message?: string): Promise<void> {
-    const icon = STATUS_ICONS[status];
-    const title = message
-      ? `${icon} MIDE: ${message}`
-      : `${icon} MIDE`;
-
-    try {
-      // Set tmux window name (visible in tmux status bar and terminal title if set-titles is on)
-      await execFileAsync("tmux", [
-        "rename-window", "-t", this.sessionName,
-        title
-      ]);
-    } catch (err) {
-      console.error(`[mide] Failed to set status: ${err}`);
-    }
   }
 
   // ==================== Dashboard Methods ====================
@@ -1628,4 +1427,3 @@ export class TmuxManager {
     await this.createDashboardLayout(dashboard, cwd);
   }
 }
-

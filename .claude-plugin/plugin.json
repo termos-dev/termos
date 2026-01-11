@@ -1,6 +1,6 @@
 {
   "name": "ide",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Interactive Development Environment: terminal panes, interactive forms/questions, process management, TUI dashboards",
   "author": {
     "name": "buremba"
@@ -9,6 +9,5 @@
   "license": "MIT",
   "keywords": ["process", "ide", "dev-server", "terminal", "interactive"],
   "commands": "./.claude-plugin/commands/",
-  "skills": "./.claude-plugin/skills/",
-  "hooks": "./.claude-plugin/hooks/hooks.json"
+  "skills": "./.claude-plugin/skills/"
 }

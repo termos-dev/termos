@@ -1,0 +1,13 @@
+#!/bin/bash
+# Wrapper script for mide CLI
+# Uses local build in development, falls back to npx for installed plugin
+
+# Resolve symlinks to get real script location (pwd -P resolves symlinks in path)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+LOCAL_DIST="${SCRIPT_DIR}/../../dist/index.js"
+
+if [ -f "$LOCAL_DIST" ]; then
+    node "$LOCAL_DIST" "$@"
+else
+    npx mcp-ide "$@"
+fi

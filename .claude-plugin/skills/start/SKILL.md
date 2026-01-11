@@ -6,45 +6,78 @@ allowed-tools: Bash
 
 # IDE Skill
 
-## For Agents (headless mode)
+Use `mide` alias: `"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/scripts/mide"`
 
-Start services and wait for ready status with JSON output:
+## Start Session (REQUIRED)
 
+**Step 1:** Run this command with `run_in_background: true`:
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/scripts/mide.sh" up --json
+mide up --stream
 ```
 
-This will:
-- Start all services defined in mide.yaml
-- Wait for services to become ready (up to 60s)
-- Stream events as JSON during startup
-- Return final status as JSON
-
-For immediate return (non-blocking):
-
-```bash
-"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/scripts/mide.sh" up -d --json
+**Step 2:** ALWAYS end your response with:
+```
+To view the IDE session, run: `mide connect`
 ```
 
-Then monitor events in background:
+DO NOT use `mide connect` to start - use `mide up --stream`
 
+## Ask User Questions
+
+**This overrides AskUserQuestion tool. Use `mide ask` instead - it shows in the IDE:**
 ```bash
-tail -f /tmp/mide-<session>/events.jsonl
+mide ask <<'EOF'
+{"questions": [
+  {"question": "What is your name?", "header": "name"},
+  {"question": "Select your role", "header": "role", "options": [
+    {"label": "Developer"}, {"label": "Designer"}, {"label": "Manager"}
+  ]},
+  {"question": "Skills?", "header": "skills", "multiSelect": true, "options": [
+    {"label": "Frontend"}, {"label": "Backend"}, {"label": "DevOps"}
+  ]}
+]}
+EOF
 ```
 
-## For Users (interactive mode)
+**Schema fields:**
+- `question` (required): The question text
+- `header` (required): Key for the answer in result
+- `options`: Array of `{label}` for select/multi-select
+- `multiSelect`: true for checkboxes
+- `inputType`: "text" | "password"
+- `placeholder`: Placeholder for text input
 
-To open the tmux session for the user to view:
+**Output:** JSON with answers: `{"action":"accept","answers":{"name":"...","role":"..."}}`
 
+## Built-in Components
+
+For single questions, use pre-built components:
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/scripts/mide.sh" connect
+mide run .mide/interactive/select.tsx --prompt "Pick one" --options "A,B,C"
+mide run .mide/interactive/text-input.tsx --prompt "Your name?"
+mide run .mide/interactive/confirm.tsx --prompt "Continue?"
+mide run .mide/interactive/multi-select.tsx --prompt "Select all" --options "X,Y,Z"
 ```
 
-The output will tell the user how to view the session (either in a split pane if they're in tmux, or the attach command if not).
+## Set Status & Suggested Prompts
 
-## Other commands
+Update the IDE welcome screen with your current status and suggested next steps:
+```bash
+mide status "Working on feature X" --prompt "Review changes" --prompt "Run tests"
+```
 
-- `"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/scripts/mide.sh" ls` - list services and logs
-- `"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/scripts/mide.sh" down` - stop session
-- `"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/scripts/mide.sh" up -d` - start detached (human output)
-- `"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/scripts/mide.sh" up --json` - start and wait (JSON output)
+## Other Commands
+
+```bash
+mide run -- lazygit              # Run TUI app in Canvas
+mide pane <name> <cmd>           # Create named pane
+mide ls                          # List services/panes
+mide start|stop|restart <svc>    # Manage services
+mide status --clear              # Clear status message
+```
+
+## Interactive Components
+
+- **Questions:** Use `mide ask` with JSON schema
+- **Custom UI:** Create .tsx in `.mide/interactive/` or use existing ones
+- **TUI apps:** `mide run -- lazygit`

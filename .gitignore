@@ -19,8 +19,8 @@ Thumbs.db
 *.swo
 *~
 
-# MIDE runtime data
-.mide-browser/
+# MIDE runtime data (logs, events)
+.mide/
 
 # VS Code server data (runtime)
 .vscode-server/data/logs/

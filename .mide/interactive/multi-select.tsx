@@ -1,42 +1,38 @@
-import { Box, Text, useInput, useApp } from 'ink';
-import { useState } from 'react';
+import React, { useState } from "react";
+import { Box, Text, useInput, useApp } from "ink";
 
-declare const onComplete: (result: unknown) => void;
-declare const args: { prompt?: string; options?: string };
+interface Props {
+  prompt?: string;
+  options?: string;  // Comma-separated options
+}
 
-function MultiSelect() {
+function MultiSelectComponent({ prompt = "Select items:", options = "TypeScript,Python,Rust,Go" }: Props) {
   const { exit } = useApp();
-  const options = (args.options || 'Option 1,Option 2,Option 3').split(',').map(s => s.trim());
+  const items = options.split(",").map((opt) => opt.trim());
   const [cursor, setCursor] = useState(0);
-  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [selected, setSelected] = useState<Set<string>>(new Set());
 
   useInput((input, key) => {
-    if (key.upArrow || input === 'k') {
-      setCursor(c => (c - 1 + options.length) % options.length);
-    } else if (key.downArrow || input === 'j') {
-      setCursor(c => (c + 1) % options.length);
-    } else if (input === ' ') {
-      setSelected(s => {
-        const newSet = new Set(s);
-        if (newSet.has(cursor)) {
-          newSet.delete(cursor);
+    if (key.escape) {
+      onComplete({ action: "cancel" });
+      exit();
+    } else if (key.upArrow) {
+      setCursor((prev) => (prev - 1 + items.length) % items.length);
+    } else if (key.downArrow) {
+      setCursor((prev) => (prev + 1) % items.length);
+    } else if (input === " ") {
+      const item = items[cursor];
+      setSelected((prev) => {
+        const newSet = new Set(prev);
+        if (newSet.has(item)) {
+          newSet.delete(item);
         } else {
-          newSet.add(cursor);
+          newSet.add(item);
         }
         return newSet;
       });
-    } else if (input === 'a') {
-      // Select all
-      setSelected(new Set(options.map((_, i) => i)));
-    } else if (input === 'n') {
-      // Select none
-      setSelected(new Set());
     } else if (key.return) {
-      const selectedOptions = Array.from(selected).map(i => options[i]);
-      onComplete({ selected: selectedOptions, indices: Array.from(selected) });
-      exit();
-    } else if (key.escape) {
-      onComplete({ cancelled: true });
+      onComplete({ action: "accept", selected: Array.from(selected) });
       exit();
     }
   });
@@ -44,26 +40,24 @@ function MultiSelect() {
   return (
     <Box flexDirection="column" padding={1}>
       <Box marginBottom={1}>
-        <Text bold color="magenta">? </Text>
-        <Text bold>{args.prompt || 'Select options:'}</Text>
-        <Text dimColor> ({selected.size} selected)</Text>
+        <Text bold color="cyan">{prompt}</Text>
       </Box>
-      {options.map((opt, i) => (
-        <Box key={i}>
-          <Text color={i === cursor ? 'cyan' : 'white'}>
-            {i === cursor ? '>' : ' '}
-            <Text color={selected.has(i) ? 'green' : 'white'}>
-              {selected.has(i) ? '[x]' : '[ ]'}
+      <Box flexDirection="column">
+        {items.map((item, idx) => (
+          <Box key={item}>
+            <Text color={idx === cursor ? "cyan" : "white"}>
+              {idx === cursor ? "> " : "  "}
+              {selected.has(item) ? "[x] " : "[ ] "}
+              {item}
             </Text>
-            {' '}{opt}
-          </Text>
-        </Box>
-      ))}
-      <Box marginTop={1} flexDirection="column">
-        <Text dimColor>Space to toggle, A=all, N=none, Enter to confirm</Text>
+          </Box>
+        ))}
+      </Box>
+      <Box marginTop={1}>
+        <Text dimColor>Arrows to move, Space to toggle, Enter to confirm, Escape to cancel</Text>
       </Box>
     </Box>
   );
 }
 
-export default MultiSelect;
+export default MultiSelectComponent;

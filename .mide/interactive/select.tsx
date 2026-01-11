@@ -1,54 +1,43 @@
-import { Box, Text, useInput, useApp } from 'ink';
-import { useState } from 'react';
+import React from "react";
+import { Box, Text, useInput, useApp } from "ink";
+import SelectInput from "ink-select-input";
 
-declare const onComplete: (result: unknown) => void;
-declare const args: { prompt?: string; options?: string };
+interface Props {
+  prompt?: string;
+  options?: string;  // Comma-separated options
+}
 
-function Select() {
+function SelectComponent({ prompt = "Select an option:", options = "Option A,Option B,Option C" }: Props) {
   const { exit } = useApp();
-  const options = (args.options || 'Option 1,Option 2,Option 3').split(',').map(s => s.trim());
-  const [selected, setSelected] = useState(0);
+
+  const items = options.split(",").map((opt) => ({
+    label: opt.trim(),
+    value: opt.trim(),
+  }));
 
   useInput((input, key) => {
-    if (key.upArrow || input === 'k') {
-      setSelected(s => (s - 1 + options.length) % options.length);
-    } else if (key.downArrow || input === 'j') {
-      setSelected(s => (s + 1) % options.length);
-    } else if (key.return) {
-      onComplete({ value: options[selected], index: selected });
+    if (key.escape) {
+      onComplete({ action: "cancel" });
       exit();
-    } else if (key.escape) {
-      onComplete({ cancelled: true });
-      exit();
-    } else {
-      // Number keys for quick selection
-      const num = parseInt(input, 10);
-      if (!isNaN(num) && num >= 1 && num <= options.length) {
-        onComplete({ value: options[num - 1], index: num - 1 });
-        exit();
-      }
     }
   });
+
+  const handleSelect = (item: { label: string; value: string }) => {
+    onComplete({ action: "accept", selected: item.value });
+    exit();
+  };
 
   return (
     <Box flexDirection="column" padding={1}>
       <Box marginBottom={1}>
-        <Text bold color="blue">? </Text>
-        <Text bold>{args.prompt || 'Select an option:'}</Text>
+        <Text bold color="cyan">{prompt}</Text>
       </Box>
-      {options.map((opt, i) => (
-        <Box key={i}>
-          <Text color={i === selected ? 'cyan' : 'white'}>
-            {i === selected ? '> ' : '  '}
-            <Text dimColor>{i + 1}.</Text> {opt}
-          </Text>
-        </Box>
-      ))}
+      <SelectInput items={items} onSelect={handleSelect} />
       <Box marginTop={1}>
-        <Text dimColor>Use arrows or number keys, Enter to select</Text>
+        <Text dimColor>Use arrows to select, Enter to confirm, Escape to cancel</Text>
       </Box>
     </Box>
   );
 }
 
-export default Select;
+export default SelectComponent;

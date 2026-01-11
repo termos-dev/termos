@@ -3,7 +3,7 @@
 import React from "react";
 import { render } from "ink";
 import { SchemaForm } from "./components/SchemaForm.js";
-import { emitResult, emitResultWithFile, setInteractionId, parseFormSchema, getSchemaHelp } from "./types.js";
+import { emitResult, parseFormSchema, getSchemaHelp } from "./types.js";
 import { runFromFile } from "./file-runner.js";
 import type { FormSchema } from "./types.js";
 
@@ -13,7 +13,6 @@ interface CliArgs {
   title?: string;
   help?: boolean;
   noSandbox?: boolean;
-  interactionId?: string;
   args?: string;  // JSON string of args to pass to component
 }
 
@@ -34,8 +33,6 @@ function parseArgs(): CliArgs {
       result.title = cliArgs[++i];
     } else if (arg === "--no-sandbox") {
       result.noSandbox = true;
-    } else if (arg === "--interaction-id" || arg === "-i") {
-      result.interactionId = cliArgs[++i];
     } else if (arg === "--args" || arg === "-a") {
       result.args = cliArgs[++i];
     }
@@ -99,6 +96,10 @@ Options:
 
 Either --schema, --file, or piped stdin is required.
 
+Environment:
+  MCP_EVENTS_FILE       Path to events.jsonl file (results written here)
+  MCP_INTERACTION_ID    Unique ID for this interaction
+
 ${getSchemaHelp()}
 
 Custom Component Format (for --file mode):
@@ -118,10 +119,6 @@ Custom Component Format (for --file mode):
     }
     export default MyComponent;
 
-Output:
-  On completion, prints: __MCP_RESULT__:{"action":"accept","answers":{...}}
-  Actions: accept, decline, cancel
-
 Controls:
   - Text input: Type and press Enter
   - Single select: Arrow keys + Enter
@@ -133,26 +130,10 @@ Controls:
 async function main(): Promise<void> {
   const args = parseArgs();
 
-  // Set interaction ID for file-based result communication
-  if (args.interactionId) {
-    setInteractionId(args.interactionId);
-  }
-
   if (args.help) {
     showHelp();
     process.exit(0);
   }
-
-  // Handle SIGINT/SIGTERM
-  process.on("SIGINT", () => {
-    emitResultWithFile({ action: "cancel" });
-    process.exit(0);
-  });
-
-  process.on("SIGTERM", () => {
-    emitResultWithFile({ action: "cancel" });
-    process.exit(0);
-  });
 
   // Mode 2: Custom component from file
   if (args.file) {

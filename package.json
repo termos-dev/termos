@@ -19,8 +19,7 @@
     "start": "node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepublishOnly": "npm run build",
-    "inspector": "npx @anthropic-ai/mcp-inspector node dist/index.js"
+    "prepublishOnly": "npm run build"
   },
   "repository": {
     "type": "git",
@@ -32,8 +31,6 @@
     "url": "https://github.com/buremba/claude-ide/issues"
   },
   "keywords": [
-    "mcp",
-    "model-context-protocol",
     "ide",
     "interactive",
     "dev-server",
@@ -41,14 +38,12 @@
     "process-manager",
     "claude-code",
     "ai-agent",
-    "form",
-    "dashboard",
-    "tui"
+    "tmux",
+    "dashboard"
   ],
   "license": "MIT",
   "dependencies": {
     "@mcp-ide/shared": "file:packages/shared",
-    "@modelcontextprotocol/sdk": "^1.0.0",
     "yaml": "^2.3.4",
     "zod": "^3.22.4"
   },

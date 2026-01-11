@@ -1,83 +1,53 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import * as fs from "fs";
+import * as os from "os";
 import * as path from "path";
 import {
-  appendEvent,
   emitReadyEvent,
   emitErrorEvent,
-  emitLogEvent,
-  emitResultEvent,
   readEvents,
   findResultEvent,
   clearEvents,
-  type MideEvent,
   type ReadyEvent,
   type ErrorEvent,
   type ResultEvent,
 } from "./events.js";
 import { getEventsFilePath } from "./tmux-manager.js";
 
+// Helper to emit result events for testing (simulates what ink-runner does)
+function emitResultEvent(
+  configDir: string,
+  id: string,
+  action: ResultEvent["action"],
+  answers?: Record<string, string | string[]>
+): void {
+  const filePath = getEventsFilePath(configDir);
+  const event = { ts: Date.now(), type: "result", id, action, ...(answers && { answers }) };
+  fs.appendFileSync(filePath, JSON.stringify(event) + "\n");
+}
+
 describe("events", () => {
-  const testSession = "test-events-session";
-  const eventsFile = getEventsFilePath(testSession);
+  const testDir = path.join(os.tmpdir(), "mide-events-test");
+  const eventsFile = getEventsFilePath(testDir);
 
   beforeEach(() => {
-    // Ensure clean state
-    const dir = path.dirname(eventsFile);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-    clearEvents(testSession);
+    fs.mkdirSync(path.dirname(eventsFile), { recursive: true });
+    clearEvents(testDir);
   });
 
   afterEach(() => {
-    // Clean up
     try {
-      fs.unlinkSync(eventsFile);
-      fs.rmdirSync(path.dirname(eventsFile));
+      fs.rmSync(testDir, { recursive: true, force: true });
     } catch {
       // Ignore
     }
   });
 
-  describe("appendEvent", () => {
-    it("should append event as JSONL", () => {
-      const event: MideEvent = {
-        ts: Date.now(),
-        type: "ready",
-        svc: "api",
-        port: 3000,
-      };
-      appendEvent(testSession, event);
-
-      const content = fs.readFileSync(eventsFile, "utf-8");
-      const lines = content.trim().split("\n");
-      expect(lines).toHaveLength(1);
-
-      const parsed = JSON.parse(lines[0]);
-      expect(parsed.type).toBe("ready");
-      expect(parsed.svc).toBe("api");
-      expect(parsed.port).toBe(3000);
-    });
-
-    it("should append multiple events", () => {
-      appendEvent(testSession, { ts: 1, type: "ready", svc: "a" });
-      appendEvent(testSession, { ts: 2, type: "ready", svc: "b" });
-      appendEvent(testSession, { ts: 3, type: "error", svc: "c", msg: "failed" });
-
-      const events = readEvents(testSession);
-      expect(events).toHaveLength(3);
-      expect((events[0] as ReadyEvent).svc).toBe("a");
-      expect((events[1] as ReadyEvent).svc).toBe("b");
-      expect(events[2].type).toBe("error");
-    });
-  });
-
   describe("emitReadyEvent", () => {
     it("should emit ready event with port and url", () => {
-      emitReadyEvent(testSession, "api", 3000, "http://localhost:3000");
+      emitReadyEvent(testDir, "api", 3000, "http://localhost:3000");
 
-      const events = readEvents(testSession);
+      const events = readEvents(testDir);
       expect(events).toHaveLength(1);
 
       const event = events[0] as ReadyEvent;
@@ -88,21 +58,33 @@ describe("events", () => {
     });
 
     it("should emit ready event without optional fields", () => {
-      emitReadyEvent(testSession, "worker");
+      emitReadyEvent(testDir, "worker");
 
-      const events = readEvents(testSession);
+      const events = readEvents(testDir);
       const event = events[0] as ReadyEvent;
       expect(event.svc).toBe("worker");
       expect(event.port).toBeUndefined();
       expect(event.url).toBeUndefined();
     });
+
+    it("should append multiple events", () => {
+      emitReadyEvent(testDir, "a");
+      emitReadyEvent(testDir, "b");
+      emitErrorEvent(testDir, "c", "failed");
+
+      const events = readEvents(testDir);
+      expect(events).toHaveLength(3);
+      expect((events[0] as ReadyEvent).svc).toBe("a");
+      expect((events[1] as ReadyEvent).svc).toBe("b");
+      expect(events[2].type).toBe("error");
+    });
   });
 
   describe("emitErrorEvent", () => {
     it("should emit error event with exit code", () => {
-      emitErrorEvent(testSession, "api", "Process crashed", 1);
+      emitErrorEvent(testDir, "api", "Process crashed", 1);
 
-      const events = readEvents(testSession);
+      const events = readEvents(testDir);
       expect(events).toHaveLength(1);
 
       const event = events[0] as ErrorEvent;
@@ -113,68 +95,43 @@ describe("events", () => {
     });
   });
 
-  describe("emitResultEvent", () => {
-    it("should emit result event with answers", () => {
-      const answers = { env: "production", confirm: "yes" };
-      emitResultEvent(testSession, "int-1", "accept", answers);
-
-      const events = readEvents(testSession);
-      expect(events).toHaveLength(1);
-
-      const event = events[0] as ResultEvent;
-      expect(event.type).toBe("result");
-      expect(event.id).toBe("int-1");
-      expect(event.action).toBe("accept");
-      expect(event.answers).toEqual(answers);
-    });
-
-    it("should emit cancel result", () => {
-      emitResultEvent(testSession, "int-2", "cancel");
-
-      const events = readEvents(testSession);
-      const event = events[0] as ResultEvent;
-      expect(event.action).toBe("cancel");
-      expect(event.answers).toBeUndefined();
-    });
-  });
-
   describe("findResultEvent", () => {
     it("should find result event by interaction id", () => {
-      emitResultEvent(testSession, "int-1", "accept", { a: "1" });
-      emitResultEvent(testSession, "int-2", "decline", { b: "2" });
-      emitResultEvent(testSession, "int-3", "cancel");
+      emitResultEvent(testDir, "int-1", "accept", { a: "1" });
+      emitResultEvent(testDir, "int-2", "decline", { b: "2" });
+      emitResultEvent(testDir, "int-3", "cancel");
 
-      const result = findResultEvent(testSession, "int-2");
+      const result = findResultEvent(testDir, "int-2");
       expect(result).not.toBeNull();
       expect(result?.id).toBe("int-2");
       expect(result?.action).toBe("decline");
     });
 
     it("should return most recent result for same id", () => {
-      emitResultEvent(testSession, "int-1", "cancel");
-      emitResultEvent(testSession, "int-1", "accept", { final: "yes" });
+      emitResultEvent(testDir, "int-1", "cancel");
+      emitResultEvent(testDir, "int-1", "accept", { final: "yes" });
 
-      const result = findResultEvent(testSession, "int-1");
+      const result = findResultEvent(testDir, "int-1");
       expect(result?.action).toBe("accept");
       expect(result?.answers).toEqual({ final: "yes" });
     });
 
     it("should return null for non-existent id", () => {
-      emitResultEvent(testSession, "int-1", "accept");
+      emitResultEvent(testDir, "int-1", "accept");
 
-      const result = findResultEvent(testSession, "int-999");
+      const result = findResultEvent(testDir, "int-999");
       expect(result).toBeNull();
     });
   });
 
   describe("clearEvents", () => {
     it("should clear all events", () => {
-      emitReadyEvent(testSession, "a");
-      emitReadyEvent(testSession, "b");
-      expect(readEvents(testSession)).toHaveLength(2);
+      emitReadyEvent(testDir, "a");
+      emitReadyEvent(testDir, "b");
+      expect(readEvents(testDir)).toHaveLength(2);
 
-      clearEvents(testSession);
-      expect(readEvents(testSession)).toHaveLength(0);
+      clearEvents(testDir);
+      expect(readEvents(testDir)).toHaveLength(0);
     });
   });
 });

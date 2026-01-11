@@ -5,7 +5,7 @@ import * as os from "os";
 import { spawn } from "child_process";
 import { createRequire } from "module";
 import { fileURLToPath } from "url";
-import { emitResult, getInteractionId, RESULT_FILE_DIR } from "./types.js";
+import { emitResult } from "./types.js";
 
 // ESM compatibility for __dirname
 const __filename = fileURLToPath(import.meta.url);
@@ -41,8 +41,6 @@ export interface RunFromFileOptions {
   title?: string;
   /** Sandbox configuration */
   sandbox?: SandboxOptions;
-  /** Interaction ID for file-based result communication */
-  interactionId?: string;
   /** Arguments to pass to the component (available as global `args`) */
   args?: Record<string, unknown>;
 }
@@ -73,7 +71,6 @@ export async function runFromFile(
   const filePath = options.filePath;
   const displayTitle = options.title;
   const sandbox: SandboxOptions = options.sandbox ?? { enabled: true };
-  const interactionId = options.interactionId ?? getInteractionId();
 
   // Validate file exists
   const absFilePath = path.resolve(filePath);
@@ -97,67 +94,51 @@ export async function runFromFile(
   const entryPath = path.join(tempDir, `ink-runner-entry-${bundleId}.tsx`);
   const bundledPath = path.join(tempDir, `ink-runner-bundle-${bundleId}.mjs`);
 
+  // Get events file path from env (passed by InteractionManager)
+  const eventsFile = process.env.MCP_EVENTS_FILE || "";
+  const interactionId = process.env.MCP_INTERACTION_ID || "";
+
   try {
     // Create entry file that wraps the user's component
-    const interactionIdJson = interactionId ? JSON.stringify(interactionId) : "null";
     const componentArgsJson = JSON.stringify(options.args || {});
     const entryScript = `
 import { render } from 'ink';
 import React from 'react';
-import { writeFileSync, existsSync } from 'fs';
+import { appendFileSync } from 'fs';
 import Component from ${JSON.stringify(absFilePath)};
 
-// Interaction ID for file-based result communication
-const __interactionId = ${interactionIdJson};
-const __resultFilePath = __interactionId ? '${RESULT_FILE_DIR}/mcp-interaction-' + __interactionId + '.result' : null;
-const __pendingFilePath = __resultFilePath ? __resultFilePath + '.pending' : null;
+// Events file path from environment
+const __eventsFile = ${JSON.stringify(eventsFile)};
+const __interactionId = ${JSON.stringify(interactionId)};
 
 // Arguments passed to the component
 globalThis.args = ${componentArgsJson};
-
-// Set up the onProgress callback for intermediate updates
-globalThis.onProgress = function(data) {
-  console.log('__MCP_PROGRESS__:' + JSON.stringify(data));
-};
 
 // Set up the onComplete callback
 let __resultEmitted = false;
 globalThis.onComplete = function(result) {
   if (__resultEmitted) return;
   __resultEmitted = true;
-  const fullResult = { action: 'accept', result };
 
-  // Write result and pending files synchronously (reliable, survives process kill)
-  if (__resultFilePath) {
-    writeFileSync(__resultFilePath, JSON.stringify(fullResult), 'utf-8');
+  // Write result directly to events file
+  if (__eventsFile && __interactionId) {
+    const event = {
+      ts: Date.now(),
+      type: 'result',
+      id: __interactionId,
+      action: 'accept',
+      result: result,
+    };
+    appendFileSync(__eventsFile, JSON.stringify(event) + '\\n');
   }
-  if (__pendingFilePath) {
-    writeFileSync(__pendingFilePath, '', 'utf-8');
-  }
 
-  // Emit to stdout for capture_pane fallback
-  console.log('__MCP_RESULT__:' + JSON.stringify(fullResult));
-  console.log('\\n\\u2713 Waiting for confirmation...');
-
-  // Poll for confirmation (pending file deleted by InteractionManager)
-  const checkConfirmation = setInterval(() => {
-    if (__pendingFilePath && !existsSync(__pendingFilePath)) {
-      clearInterval(checkConfirmation);
-      process.exit(0);
-    }
-  }, 100);
-
-  // Fallback timeout after 60s
-  setTimeout(() => {
-    clearInterval(checkConfirmation);
-    process.exit(0);
-  }, 60000);
+  // Exit immediately
+  process.exit(0);
 };
 
 // Validate default export
 if (!Component) {
   console.error('Error: Component must have a default export');
-  console.log('__MCP_RESULT__:' + JSON.stringify({ action: 'cancel' }));
   process.exit(1);
 }
 
@@ -211,8 +192,8 @@ const __dirname = __dirname_fn(__filename);
         {
           name: "resolve-ink-runner-deps",
           setup(build) {
-            // Resolve bare specifiers for ink and react
-            build.onResolve({ filter: /^(ink|react|react\/jsx-runtime)$/ }, (args) => {
+            // Resolve bare specifiers for ink, react, and ink-* packages
+            build.onResolve({ filter: /^(ink|ink-[a-z-]+|react|react\/jsx-runtime)$/ }, (args) => {
               try {
                 // Explicitly resolve from ink-runner's node_modules, not from CWD
                 // This is critical when running as a Claude Code plugin
@@ -300,7 +281,7 @@ const __dirname = __dirname_fn(__filename);
       // The code is bundled so it won't load external modules anyway
       nodeArgs.push("--allow-fs-read=*");
 
-      // Allow writing only to temp directories
+      // Allow writing only to temp directories and the events file
       // Node 25+ requires separate flags for each path instead of comma-separated
       const allowedWritePaths = [
         tempDir,
@@ -308,6 +289,7 @@ const __dirname = __dirname_fn(__filename);
         "/var/folders",
         "/private/var/folders",
         "/private/tmp",
+        ...(eventsFile ? [path.dirname(eventsFile)] : []),
         ...(sandbox.allowFsWrite ?? []),
       ];
       for (const writePath of allowedWritePaths) {

@@ -5,7 +5,7 @@ import { Config, ProcessConfig, ResolvedProcessConfig, resolveProcessConfigs, so
 import { ManagedProcess, ProcessState, StartOptions, ProcessSettings } from "./process.js";
 import { EnvContext } from "./env-resolver.js";
 import { TmuxManager } from "./tmux-manager.js";
-import { emitReadyEvent, emitErrorEvent } from "./events.js";
+import { emitReadyEvent, emitErrorEvent, getLatestStatus } from "./events.js";
 
 // Get directory of this module (for finding bundled components)
 const __filename = fileURLToPath(import.meta.url);
@@ -283,7 +283,7 @@ export class ProcessManager extends EventEmitter {
   /**
    * Show the welcome Ink component in window 0
    */
-  private async showWelcomeComponent(): Promise<void> {
+  async showWelcomeComponent(): Promise<void> {
     // Build tab info for welcome display
     const tabs = Array.from(this.tabIndices.entries()).map(([name, windowIndex]) => {
       const isLayout = this.layoutTabs.has(name);
@@ -301,12 +301,12 @@ export class ProcessManager extends EventEmitter {
       };
     });
 
-    // Find interactive files in .mide/interactive/ (project) and ~/.mide/interactions/ (global)
+    // Find interactive files in .mide/interactive/ (project) and ~/.mide/interactive/ (global)
     let projectInteractive: string[] = [];
     let globalInteractive: string[] = [];
 
     const projectInteractiveDir = path.join(this.configDir, ".mide/interactive");
-    const globalInteractiveDir = path.join(process.env.HOME || "~", ".mide/interactions");
+    const globalInteractiveDir = path.join(process.env.HOME || "~", ".mide/interactive");
 
     try {
       const fs = await import("fs");
@@ -324,11 +324,16 @@ export class ProcessManager extends EventEmitter {
       // Ignore errors
     }
 
+    // Get latest LLM status
+    const statusEvent = getLatestStatus(this.tmuxManager.configDir);
+
     const args = {
       sessionName: this.tmuxManager.sessionName,
       tabs,
       projectInteractive,
       globalInteractive,
+      status: statusEvent?.message ?? undefined,
+      prompts: statusEvent?.prompts,
     };
 
     // Find the ink-runner components directory
@@ -403,17 +408,21 @@ export class ProcessManager extends EventEmitter {
           // Emit event for dependency waiting
           this.emit("processReady", p.name);
           // Write to events file
-          emitReadyEvent(this.tmuxManager.sessionName, p.name, p.port, p.url);
+          emitReadyEvent(this.tmuxManager.configDir, p.name, p.port, p.url);
           // Adjust poll rate once processes are ready
           this.adjustTmuxPollRate();
+          // Refresh welcome component to show updated status
+          this.showWelcomeComponent();
         },
         onCrash: (p, exitCode) => {
           this.events.onProcessCrash?.(p.name, exitCode);
           // Emit event for dependency waiting (in case something is waiting)
           this.emit("processFailed", p.name, exitCode);
           // Write to events file
-          emitErrorEvent(this.tmuxManager.sessionName, p.name, "Process crashed", exitCode ?? undefined);
+          emitErrorEvent(this.tmuxManager.configDir, p.name, "Process crashed", exitCode ?? undefined);
           this.handleCrash(p.name, processConfig);
+          // Refresh welcome component to show updated status
+          this.showWelcomeComponent();
         },
         onLog: (p, line, stream) => {
           this.events.onLog?.(p.name, line, stream);
@@ -508,6 +517,14 @@ export class ProcessManager extends EventEmitter {
    */
   async reload(newConfig: Config): Promise<{ added: string[]; removed: string[]; changed: string[]; tabsReloaded: boolean }> {
     const oldProcessNames = new Set(this.processConfigs.keys());
+
+    // Track which processes were running before reload (for autoStart=false)
+    const wasRunning = new Set<string>();
+    for (const [name, process] of this.processes) {
+      if (process.isRunning()) {
+        wasRunning.add(name);
+      }
+    }
 
     // Get service tabs from new config (filter out layout tabs)
     const newServiceTabs = newConfig.tabs
@@ -635,7 +652,7 @@ export class ProcessManager extends EventEmitter {
     for (const processConfig of sorted) {
       if (added.includes(processConfig.name) || changed.includes(processConfig.name)) {
         const blockReason = this.getAutoStartBlockReason(processConfig);
-        if (blockReason) {
+        if (blockReason && !wasRunning.has(processConfig.name)) {
           console.error(`[mide] Not auto-starting "${processConfig.name}" (${blockReason})`);
           continue;
         }
@@ -674,7 +691,7 @@ export class ProcessManager extends EventEmitter {
             const processConfig = this.processConfigs.get(name);
             if (processConfig) {
               const blockReason = this.getAutoStartBlockReason(processConfig);
-              if (blockReason) {
+              if (blockReason && !wasRunning.has(name)) {
                 console.error(`[mide] Not auto-starting "${name}" (${blockReason})`);
                 return;
               }
@@ -1077,11 +1094,12 @@ export class ProcessManager extends EventEmitter {
 
     // Create the pane in window 0
     const targetGroup = group ?? "dynamic";
-    const paneId = await this.tmuxManager.createDynamicPane(
+    const paneId = await this.tmuxManager.createPane(
       name,
       command,
       this.configDir,
-      targetGroup
+      undefined,
+      { targetWindow: 0, setTitle: true }
     );
 
     const terminal: DynamicTerminal = {

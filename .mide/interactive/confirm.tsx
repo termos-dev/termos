@@ -1,28 +1,25 @@
-import { Box, Text, useInput, useApp } from 'ink';
-import { useState } from 'react';
+import React, { useState } from "react";
+import { Box, Text, useInput, useApp } from "ink";
 
-declare const onComplete: (result: unknown) => void;
-declare const args: { prompt?: string; defaultYes?: string };
+interface Props {
+  prompt?: string;
+  defaultYes?: boolean;
+}
 
-function Confirm() {
+function ConfirmComponent({ prompt = "Are you sure?", defaultYes = false }: Props) {
   const { exit } = useApp();
-  const [selected, setSelected] = useState(args.defaultYes === 'true' ? 0 : 1);
-  const options = ['Yes', 'No'];
+  const [selected, setSelected] = useState(defaultYes ? 0 : 1);
 
   useInput((input, key) => {
-    if (key.leftArrow || key.rightArrow || input === 'h' || input === 'l') {
-      setSelected(s => (s + 1) % 2);
-    } else if (input === 'y' || input === 'Y') {
-      onComplete({ confirmed: true });
+    if (key.escape) {
+      onComplete({ action: "cancel" });
       exit();
-    } else if (input === 'n' || input === 'N') {
-      onComplete({ confirmed: false });
-      exit();
+    } else if (key.leftArrow || input === "y" || input === "Y") {
+      setSelected(0);
+    } else if (key.rightArrow || input === "n" || input === "N") {
+      setSelected(1);
     } else if (key.return) {
-      onComplete({ confirmed: selected === 0 });
-      exit();
-    } else if (key.escape) {
-      onComplete({ cancelled: true });
+      onComplete({ action: "accept", confirmed: selected === 0 });
       exit();
     }
   });
@@ -30,27 +27,27 @@ function Confirm() {
   return (
     <Box flexDirection="column" padding={1}>
       <Box marginBottom={1}>
-        <Text bold color="yellow">? </Text>
-        <Text bold>{args.prompt || 'Are you sure?'}</Text>
+        <Text bold color="yellow">{prompt}</Text>
       </Box>
       <Box gap={2}>
-        {options.map((opt, i) => (
-          <Box key={opt}>
-            <Text
-              color={i === selected ? 'cyan' : 'white'}
-              bold={i === selected}
-              inverse={i === selected}
-            >
-              {' '}{opt}{' '}
-            </Text>
-          </Box>
-        ))}
+        <Text
+          color={selected === 0 ? "green" : "white"}
+          bold={selected === 0}
+        >
+          {selected === 0 ? "> " : "  "}[Yes]
+        </Text>
+        <Text
+          color={selected === 1 ? "red" : "white"}
+          bold={selected === 1}
+        >
+          {selected === 1 ? "> " : "  "}[No]
+        </Text>
       </Box>
       <Box marginTop={1}>
-        <Text dimColor>Press Y/N or use arrows and Enter</Text>
+        <Text dimColor>Use arrows or Y/N, Enter to confirm, Escape to cancel</Text>
       </Box>
     </Box>
   );
 }
 
-export default Confirm;
+export default ConfirmComponent;

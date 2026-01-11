@@ -23,6 +23,13 @@ export class FileWatcher extends EventEmitter {
       this.watcher = fs.watch(this.configPath, (eventType) => {
         if (eventType === "change") {
           this.handleChange();
+          return;
+        }
+
+        if (eventType === "rename") {
+          // Some editors replace the file on save (rename), reattach watcher
+          this.handleChange();
+          this.restartWatcher();
         }
       });
 
@@ -53,5 +60,16 @@ export class FileWatcher extends EventEmitter {
       this.debounceTimer = null;
       this.emit("configChanged");
     }, this.debounceMs);
+  }
+
+  private restartWatcher(): void {
+    // Reattach after a short delay to allow file replacement to complete
+    setTimeout(() => {
+      if (this.watcher) {
+        this.watcher.close();
+        this.watcher = null;
+      }
+      this.start();
+    }, 50);
   }
 }

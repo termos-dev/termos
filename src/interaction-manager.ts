@@ -3,31 +3,13 @@ import * as path from "path";
 import * as fs from "fs";
 import * as os from "os";
 import { fileURLToPath } from "url";
-import { existsSync, readFileSync, unlinkSync } from "fs";
 import {
-  RESULT_PREFIX,
-  getResultFilePath,
   buildInteractionEnv,
   type FormSchema,
 } from "@mcp-ide/shared";
-import { emitResultEvent } from "./events.js";
-
-/**
- * Common interface for tmux managers (TmuxManager and EmbeddedTmuxManager)
- * Defines the methods needed by InteractionManager
- */
-export interface TmuxPaneManager {
-  createPane(
-    name: string,
-    command: string,
-    cwd: string,
-    env?: Record<string, string>,
-    options?: { direction?: "auto" | "right" | "left" | "top" | "bottom"; skipRebalance?: boolean }
-  ): Promise<string>;
-  killPane(name: string): Promise<void>;
-  paneExists(name: string): Promise<boolean>;
-  capturePane(name: string, lines?: number): Promise<string>;
-}
+import { findResultEvent } from "./events.js";
+import { getEventsFilePath } from "./tmux-manager.js";
+import type { TmuxManager } from "./tmux-manager.js";
 
 // ESM compatibility for __dirname
 const __filename = fileURLToPath(import.meta.url);
@@ -39,7 +21,6 @@ const __dirname = path.dirname(__filename);
  */
 export const INTERACTIVE_DIR = ".mide/interactive";
 
-export type InteractionMode = "schema" | "custom";
 export type InteractionStatus = "pending" | "completed" | "cancelled" | "timeout";
 export type InteractionAction = "accept" | "decline" | "cancel" | "timeout";
 
@@ -51,12 +32,12 @@ export interface InteractionResult {
 
 export interface InteractionState {
   id: string;
-  mode: InteractionMode;
   paneId: string;
   status: InteractionStatus;
   result?: InteractionResult;
   createdAt: Date;
   timeoutMs?: number;
+  ephemeral?: boolean;  // If true, kill pane when result detected
 }
 
 export interface CreateInteractionOptions {
@@ -65,16 +46,15 @@ export interface CreateInteractionOptions {
   inkArgs?: Record<string, unknown>;  // Args to pass to ink component
   command?: string;  // Arbitrary command to run
   title?: string;
-  group?: string;
   timeoutMs?: number;
 }
 
 interface InteractionManagerOptions {
-  tmuxManager: TmuxPaneManager;
+  tmuxManager: TmuxManager;
   inkRunnerPath?: string;
   pollIntervalMs?: number;
   cwd?: string;  // Project root directory for resolving ink_file paths
-  sessionName?: string;  // Tmux session name for events file
+  configDir?: string;  // Config directory for events file
 }
 
 /**
@@ -82,45 +62,37 @@ interface InteractionManagerOptions {
  */
 export class InteractionManager extends EventEmitter {
   private interactions: Map<string, InteractionState> = new Map();
-  private tmuxManager: TmuxPaneManager;
+  private tmuxManager: TmuxManager;
   private inkRunnerPath: string;
   private pollIntervalMs: number;
   private pollTimers: Map<string, NodeJS.Timeout> = new Map();
   private idCounter = 0;
   private cwd: string;
-  private sessionName: string | undefined;
+  private configDir: string;
 
   constructor(options: InteractionManagerOptions) {
     super();
     this.tmuxManager = options.tmuxManager;
     this.pollIntervalMs = options.pollIntervalMs ?? 500;
     this.cwd = options.cwd ?? process.cwd();
-    this.sessionName = options.sessionName;
+    this.configDir = options.configDir ?? process.cwd();
 
     // Find runner path relative to this module
     this.inkRunnerPath = options.inkRunnerPath ?? this.findInkRunnerPath();
   }
 
   /**
-   * Set the session name (for emitting events)
+   * Set the config directory (for events file)
    */
-  setSessionName(sessionName: string): void {
-    this.sessionName = sessionName;
+  setConfigDir(configDir: string): void {
+    this.configDir = configDir;
   }
 
   /**
-   * Emit result to events file if session name is set
+   * Get the events file path
    */
-  private emitResultToEventsFile(id: string, result: InteractionResult): void {
-    if (this.sessionName) {
-      emitResultEvent(
-        this.sessionName,
-        id,
-        result.action,
-        result.answers,
-        result.result
-      );
-    }
+  private getEventsFile(): string {
+    return getEventsFilePath(this.configDir);
   }
 
   /**
@@ -143,14 +115,28 @@ export class InteractionManager extends EventEmitter {
       return filePath;
     }
 
+    // Handle paths that already include .mide/interactive/ prefix
+    // This allows both "select.tsx" and ".mide/interactive/select.tsx" to work
+    let normalizedPath = filePath;
+    const interactivePrefix = INTERACTIVE_DIR + "/";
+    if (filePath.startsWith(interactivePrefix)) {
+      normalizedPath = filePath.slice(interactivePrefix.length);
+    }
+
     // Try project-local .mide/interactive/ first
-    const projectPath = path.join(this.getInteractiveDir(), filePath);
+    const projectPath = path.join(this.getInteractiveDir(), normalizedPath);
     if (fs.existsSync(projectPath)) {
       return projectPath;
     }
 
+    // Try CWD-relative path (for .mide/interactive/foo.tsx style paths)
+    const cwdRelative = path.join(this.cwd, filePath);
+    if (fs.existsSync(cwdRelative)) {
+      return cwdRelative;
+    }
+
     // Try global ~/.mide/interactive/
-    const globalPath = path.join(os.homedir(), ".mide", "interactive", filePath);
+    const globalPath = path.join(os.homedir(), ".mide", "interactive", normalizedPath);
     if (fs.existsSync(globalPath)) {
       return globalPath;
     }
@@ -185,95 +171,50 @@ export class InteractionManager extends EventEmitter {
   }
 
   /**
-   * Determine which runner to use based on options
-   * - inkFile → ink-runner (React components)
-   * - command → run command directly
-   * - schema → ink-runner with schema (rendered as form)
-   */
-  private selectRunner(options: CreateInteractionOptions): "ink" | "command" {
-    // Ink file specified → ink
-    if (options.inkFile) {
-      return "ink";
-    }
-
-    // Schema specified → ink (will be rendered as form)
-    if (options.schema) {
-      return "ink";
-    }
-
-    // Command → direct
-    if (options.command) {
-      return "command";
-    }
-
-    throw new Error("Must specify schema, inkFile, or command");
-  }
-
-  /**
    * Create a new interaction
    */
   async create(options: CreateInteractionOptions): Promise<string> {
     const id = `interaction-${++this.idCounter}-${Date.now()}`;
+    const eventsFile = this.getEventsFile();
+    const env = buildInteractionEnv(id, eventsFile);
+    const shellEscape = (s: string) => s.replace(/'/g, "'\\''");
 
-    if (!options.schema && !options.inkFile && !options.command) {
+    let command: string;
+
+    if (options.inkFile) {
+      const resolvedPath = this.resolveInkFile(options.inkFile);
+      command = `node "${this.inkRunnerPath}" --file '${shellEscape(resolvedPath)}'`;
+      if (options.title) command += ` --title '${shellEscape(options.title)}'`;
+      if (options.inkArgs) command += ` --args '${shellEscape(JSON.stringify(options.inkArgs))}'`;
+    } else if (options.schema) {
+      command = `node "${this.inkRunnerPath}" --schema '${shellEscape(JSON.stringify(options.schema))}'`;
+      if (options.title) command += ` --title '${shellEscape(options.title)}'`;
+    } else if (options.command) {
+      // Wrap command to write result to events file on exit
+      command = `${options.command}; code=$?; ` +
+        `if [ $code -eq 0 ]; then action=accept; else action=decline; fi; ` +
+        `echo '{"ts":'$(date +%s000)',"type":"result","id":"${id}","action":"'$action'","result":{"exitCode":'$code'}}' >> "${eventsFile}"`;
+    } else {
       throw new Error("Either schema, inkFile, or command is required");
     }
 
-    // Determine which runner to use
-    const runner = this.selectRunner(options);
-    const mode: InteractionMode = runner === "ink" ? "custom" : "schema";
+    // Smart default: .mide/interactive/* and schema forms are ephemeral
+    // Shell commands are persistent (user may want to see output)
+    const isInteractiveComponent = options.inkFile?.includes('.mide/interactive/') ||
+                                   options.inkFile?.includes('.mide\\interactive\\');
+    const ephemeral = !!(isInteractiveComponent || options.schema);
 
-    // Build environment variables for the interaction
-    const env = buildInteractionEnv(id);
-
-    // Build the command based on runner type
-    let command: string;
-    const shellEscape = (s: string) => s.replace(/'/g, "'\\''");
-
-    switch (runner) {
-      case "ink": {
-        // Use ink-runner for custom React components or schema-based forms
-        if (options.inkFile) {
-          const resolvedPath = this.resolveInkFile(options.inkFile);
-          command = `node "${this.inkRunnerPath}" --file '${shellEscape(resolvedPath)}' --interaction-id '${id}'`;
-        } else if (options.schema) {
-          // Schema mode: pass schema to ink-runner (it has built-in form handling)
-          const schemaJson = JSON.stringify(options.schema);
-          command = `node "${this.inkRunnerPath}" --schema '${shellEscape(schemaJson)}' --interaction-id '${id}'`;
-        } else {
-          throw new Error("ink runner requires inkFile or schema");
-        }
-        if (options.title) {
-          command += ` --title '${shellEscape(options.title)}'`;
-        }
-        if (options.inkArgs) {
-          command += ` --args '${shellEscape(JSON.stringify(options.inkArgs))}'`;
-        }
-        break;
-      }
-
-      case "command": {
-        // Run arbitrary command directly
-        command = options.command!;
-        break;
-      }
-    }
-
-    // Create tmux pane for the interaction with env vars
-    const paneId = await this.tmuxManager.createPane(
-      id,
-      command,
-      process.cwd(),
-      env
-    );
+    const paneId = await this.tmuxManager.createPane(id, command, process.cwd(), env, {
+      targetWindow: 0,  // Show in Canvas
+    });
 
     const state: InteractionState = {
       id,
-      mode,
       paneId,
       status: "pending",
       createdAt: new Date(),
       timeoutMs: options.timeoutMs,
+      ephemeral,  // Store for cleanup decision
     };
 
     this.interactions.set(id, state);
@@ -359,17 +300,7 @@ export class InteractionManager extends EventEmitter {
     // Stop polling
     this.stopPolling(id);
 
-    // Clean up result file if exists
-    try {
-      const resultFilePath = getResultFilePath(id);
-      if (existsSync(resultFilePath)) {
-        unlinkSync(resultFilePath);
-      }
-    } catch {
-      // Ignore cleanup errors
-    }
-
-    // Kill the tmux pane (use interaction id as the "process name" since that's what we registered with)
+    // Kill the tmux pane
     try {
       await this.tmuxManager.killPane(id);
     } catch {
@@ -379,7 +310,6 @@ export class InteractionManager extends EventEmitter {
     // Update state
     state.status = "cancelled";
     state.result = { action: "cancel" };
-    this.emitResultToEventsFile(id, state.result);
     this.emit("interactionComplete", id, state.result);
 
     return true;
@@ -396,17 +326,7 @@ export class InteractionManager extends EventEmitter {
 
     this.stopPolling(id);
 
-    // Clean up result file if exists
-    try {
-      const resultFilePath = getResultFilePath(id);
-      if (existsSync(resultFilePath)) {
-        unlinkSync(resultFilePath);
-      }
-    } catch {
-      // Ignore cleanup errors
-    }
-
-    // Try to kill pane if it still exists (use interaction id as the "process name")
+    // Try to kill pane if it still exists
     try {
       await this.tmuxManager.killPane(id);
     } catch {
@@ -417,7 +337,7 @@ export class InteractionManager extends EventEmitter {
   }
 
   /**
-   * Start polling for result in tmux pane
+   * Start polling for result in events file
    */
   private startPolling(id: string): void {
     const poll = async () => {
@@ -435,68 +355,41 @@ export class InteractionManager extends EventEmitter {
           state.result = { action: "timeout" };
           this.stopPolling(id);
           await this.cleanup(id);
-          this.emitResultToEventsFile(id, state.result);
           this.emit("interactionComplete", id, state.result);
           return;
         }
       }
 
-      // Check for result file FIRST (primary, more reliable method)
-      // This must happen before pane check to handle edge case where pane is
-      // forcibly removed but result file was already written
-      const resultFilePath = getResultFilePath(id);
-      const pendingFilePath = `${resultFilePath}.pending`;
-      try {
-        if (existsSync(resultFilePath)) {
-          const fileContent = readFileSync(resultFilePath, "utf-8");
-          const result = JSON.parse(fileContent) as InteractionResult;
-          state.status = "completed";
-          state.result = result;
-          this.stopPolling(id);
-          // Delete pending file to signal confirmation to ink-runner
-          try { unlinkSync(pendingFilePath); } catch { /* ignore */ }
-          // Clean up result file immediately
-          try { unlinkSync(resultFilePath); } catch { /* ignore */ }
-          // Clean up pane after small delay to allow output to be seen
-          setTimeout(() => this.cleanup(id), 1000);
-          this.emitResultToEventsFile(id, result);
-          this.emit("interactionComplete", id, result);
-          return;
-        }
-      } catch {
-        // File read failed, continue with fallback
-      }
-
-      // Check if pane still exists (use interaction id as the "process name")
-      const paneExists = await this.tmuxManager.paneExists(id);
-      if (!paneExists) {
-        // Pane was closed/died AND no result file = treat as cancel
-        state.status = "cancelled";
-        state.result = { action: "cancel" };
+      // Check for result in events file
+      const resultEvent = findResultEvent(this.configDir, id);
+      if (resultEvent) {
+        state.status = "completed";
+        state.result = {
+          action: resultEvent.action,
+          answers: resultEvent.answers,
+          result: resultEvent.result,
+        };
         this.stopPolling(id);
-        this.interactions.delete(id);  // Remove from memory
-        this.emitResultToEventsFile(id, state.result);
+        // Kill pane if ephemeral, otherwise leave it visible (dead but readable)
+        if (state.ephemeral) {
+          await this.cleanup(id);
+        } else {
+          this.interactions.delete(id);
+        }
         this.emit("interactionComplete", id, state.result);
         return;
       }
 
-      // Fallback: Capture pane output and look for result (use interaction id as "process name")
-      try {
-        const output = await this.tmuxManager.capturePane(id, 50);
-        const result = this.parseResult(output);
-
-        if (result) {
-          state.status = "completed";
-          state.result = result;
-          this.stopPolling(id);
-          // Clean up pane after small delay to allow output to be seen
-          setTimeout(() => this.cleanup(id), 1000);
-          this.emitResultToEventsFile(id, result);
-          this.emit("interactionComplete", id, result);
-          return;
-        }
-      } catch {
-        // Pane might have been closed
+      // Check if pane still exists
+      const paneExists = await this.tmuxManager.paneExists(id);
+      if (!paneExists) {
+        // Pane was closed/died without result = treat as cancel
+        state.status = "cancelled";
+        state.result = { action: "cancel" };
+        this.stopPolling(id);
+        this.interactions.delete(id);
+        this.emit("interactionComplete", id, state.result);
+        return;
       }
 
       // Schedule next poll
@@ -516,27 +409,6 @@ export class InteractionManager extends EventEmitter {
       clearTimeout(timer);
       this.pollTimers.delete(id);
     }
-  }
-
-  /**
-   * Parse result from pane output
-   */
-  private parseResult(output: string): InteractionResult | null {
-    const lines = output.split("\n");
-
-    for (const line of lines) {
-      const prefixIndex = line.indexOf(RESULT_PREFIX);
-      if (prefixIndex !== -1) {
-        const jsonStr = line.substring(prefixIndex + RESULT_PREFIX.length);
-        try {
-          return JSON.parse(jsonStr);
-        } catch {
-          // Invalid JSON, continue searching
-        }
-      }
-    }
-
-    return null;
   }
 
   /**

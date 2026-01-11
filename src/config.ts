@@ -182,7 +182,7 @@ export const SettingsSchema = z.object({
     .describe("Prefix for tmux session names (default: mide)"),
   // Split direction when running inside tmux
   splitDirection: SplitDirectionSchema
-    .describe("Direction to split pane: right, left, top, bottom (default: right)"),
+    .describe("Direction to split pane: auto, right, left, top, bottom (default: auto)"),
   // Custom session name (supports env vars: $VAR or ${VAR})
   sessionName: z
     .string()
@@ -203,29 +203,46 @@ export const ConfigSchema = z.object({
   tabs: TabsSchema.optional().describe("Named tabs. String = service command, array = layout panes, object = service with options."),
   // Full settings
   settings: SettingsSchema.optional().describe("Global settings for the IDE"),
-}).refine(
-  (data) => data.tabs && Object.keys(data.tabs).length > 0,
-  { message: "At least one tab must be defined in 'tabs'" }
-).refine(
-  (data) => {
-    if (!data.tabs) return true;
-    for (const name of Object.keys(data.tabs)) {
-      const result = validateTabName(name);
-      if (!result.valid) return false;
-    }
-    return true;
-  },
-  (data) => {
-    if (!data.tabs) return { message: "No tabs defined" };
-    for (const name of Object.keys(data.tabs)) {
-      const result = validateTabName(name);
-      if (!result.valid) {
-        return { message: `Invalid tab name: ${result.error}` };
-      }
-    }
-    return { message: "Invalid tab name" };
+  // Legacy keys (kept for backward compatibility)
+  services: z.record(ProcessConfigSchema).optional().describe("Legacy: service definitions (use tabs instead)"),
+  processes: z.record(ProcessConfigSchema).optional().describe("Legacy: process definitions (use tabs instead)"),
+}).superRefine((data, ctx) => {
+  const tabs =
+    (data.tabs && Object.keys(data.tabs).length > 0) ? data.tabs :
+    (data.services && Object.keys(data.services).length > 0) ? data.services :
+    (data.processes && Object.keys(data.processes).length > 0) ? data.processes :
+    undefined;
+
+  if (!tabs) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "At least one tab must be defined in 'tabs' (or legacy 'services'/'processes')",
+    });
+    return;
   }
-);
+
+  for (const name of Object.keys(tabs)) {
+    const result = validateTabName(name);
+    if (!result.valid) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Invalid tab name: ${result.error}`,
+      });
+      return;
+    }
+  }
+}).transform((data) => {
+  const tabs =
+    (data.tabs && Object.keys(data.tabs).length > 0) ? data.tabs :
+    (data.services && Object.keys(data.services).length > 0) ? data.services :
+    (data.processes && Object.keys(data.processes).length > 0) ? data.processes :
+    {};
+
+  return {
+    tabs,
+    settings: data.settings,
+  };
+});
 
 export type Config = z.infer<typeof ConfigSchema>;
 
@@ -405,7 +422,24 @@ export function expandEnvVars(str: string): string {
 export function tabsEqual(a: TabsConfig | undefined, b: TabsConfig | undefined): boolean {
   if (!a && !b) return true;
   if (!a || !b) return false;
-  return JSON.stringify(a) === JSON.stringify(b);
+
+  const normalize = (value: unknown): unknown => {
+    if (Array.isArray(value)) {
+      return value.map(normalize);
+    }
+    if (value && typeof value === "object") {
+      const entries = Object.entries(value as Record<string, unknown>)
+        .sort(([ka], [kb]) => ka.localeCompare(kb));
+      const result: Record<string, unknown> = {};
+      for (const [k, v] of entries) {
+        result[k] = normalize(v);
+      }
+      return result;
+    }
+    return value;
+  };
+
+  return JSON.stringify(normalize(a)) === JSON.stringify(normalize(b));
 }
 
 /**

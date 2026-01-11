@@ -4,7 +4,7 @@ allowed-tools: Bash
 
 List all services and their status.
 
-Run: `"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/scripts/mide.sh" ls`
+Run: `"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/scripts/mide" ls`
 
 Output includes:
 - Service name and status
@@ -13,4 +13,4 @@ Output includes:
 - Log file path (use `tail -f` to view logs)
 - Events file path (for real-time events)
 
-If no session is running, suggest running `"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/scripts/mide.sh" connect` first.
+If no session is running, suggest running `"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/scripts/mide" connect` first.
