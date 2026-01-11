@@ -106,10 +106,20 @@ async function bundle() {
   // Build ink-runner (clack-runner has been removed)
   await bundlePackage('ink-runner');
 
-  // Copy shared into runner's node_modules so they can resolve @termosdev/shared
-  console.log('\nLinking shared package to ink-runner...');
+  // Copy shared into node_modules so imports can resolve @termosdev/shared
+  console.log('\nLinking shared package...');
   const sharedDist = path.join(projectRoot, 'dist/shared');
 
+  // Link to main dist/node_modules for the CLI
+  const mainSharedDest = path.join(projectRoot, 'dist/node_modules/@termosdev/shared');
+  if (fs.existsSync(mainSharedDest)) {
+    fs.rmSync(mainSharedDest, { recursive: true });
+  }
+  fs.mkdirSync(path.dirname(mainSharedDest), { recursive: true });
+  copyDir(sharedDist, mainSharedDest);
+  console.log('  Linked shared to dist/node_modules');
+
+  // Link to ink-runner's node_modules
   const runnerSharedDest = path.join(projectRoot, 'dist/ink-runner/node_modules/@termosdev/shared');
   if (fs.existsSync(runnerSharedDest)) {
     fs.rmSync(runnerSharedDest, { recursive: true });
