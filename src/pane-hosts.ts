@@ -80,8 +80,18 @@ function createMacTerminalHost(sessionName: string): PaneHost {
         `cd ${shellEscape(cwd)}; ${clearCommand}; ${titleCommand}; ${command}`,
         env
       );
-      const script = `tell application \"Terminal\" to do script \"${escapeAppleScript(shellCommand)}\"`;
-      await execFileAsync("osascript", ["-e", "tell application \"Terminal\" to activate", "-e", script]);
+      const script = [
+        "tell application \"Terminal\"",
+        "activate",
+        "if (count of windows) is 0 then",
+        "  do script \"\"",
+        "end if",
+        `set newTab to do script \"${escapeAppleScript(shellCommand)}\" in front window`,
+        `set custom title of newTab to \"${escapeAppleScript(`termos:${name}`)}\"`,
+        "set title displays custom title of newTab to true",
+        "end tell",
+      ].join("\n");
+      await execFileAsync("osascript", ["-e", script]);
     },
     async close(name) {
       if (!name) return;
@@ -90,6 +100,14 @@ function createMacTerminalHost(sessionName: string): PaneHost {
         "tell application \"Terminal\"",
         "repeat with w in windows",
         "repeat with t in tabs of w",
+        "set tabTitle to \"\"",
+        "try",
+        "set tabTitle to custom title of t",
+        "end try",
+        `if tabTitle is \"${escapeAppleScript(target)}\" then`,
+        "close t",
+        "return",
+        "end if",
         `if (name of t) contains \"${escapeAppleScript(target)}\" then`,
         "close t",
         "return",
