@@ -74,8 +74,12 @@ function createMacTerminalHost(sessionName: string): PaneHost {
     async run(command, options, env) {
       const cwd = options.cwd ?? process.cwd();
       const name = options.name ?? "termos";
+      const clearCommand = `printf '\\033[3J\\033[H\\033[2J'`;
       const titleCommand = `printf '\\033]0;termos:${name}\\007'`;
-      const shellCommand = buildShellCommand(`cd ${shellEscape(cwd)}; ${titleCommand}; ${command}`, env);
+      const shellCommand = buildShellCommand(
+        `cd ${shellEscape(cwd)}; ${clearCommand}; ${titleCommand}; ${command}`,
+        env
+      );
       const script = `tell application \"Terminal\" to do script \"${escapeAppleScript(shellCommand)}\"`;
       await execFileAsync("osascript", ["-e", "tell application \"Terminal\" to activate", "-e", script]);
     },
