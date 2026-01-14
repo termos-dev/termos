@@ -216,7 +216,6 @@ export class InteractionManager extends EventEmitter {
     };
     const shellEscape = (s: string) => s.replace(/'/g, "'\\''");
     const pidPrefix = 'if [ -n "$TERMOS_PID_FILE" ]; then echo $$ > "$TERMOS_PID_FILE"; fi';
-    const ttyPrefix = 'if [ -n "$TERMOS_TTY_FILE" ]; then tty > "$TERMOS_TTY_FILE"; fi';
     const useExec = this.host.kind === "zellij";
 
     let command: string;
@@ -224,12 +223,12 @@ export class InteractionManager extends EventEmitter {
     if (options.inkFile) {
       const resolvedPath = this.resolveInkFile(options.inkFile);
       const execPrefix = useExec ? "exec " : "";
-      command = `${pidPrefix}; ${ttyPrefix}; ${execPrefix}node "${this.inkRunnerPath}" --file '${shellEscape(resolvedPath)}'`;
+      command = `${pidPrefix}; ${execPrefix}node "${this.inkRunnerPath}" --file '${shellEscape(resolvedPath)}'`;
       if (options.title) command += ` --title '${shellEscape(options.title)}'`;
       if (options.inkArgs) command += ` --args '${shellEscape(JSON.stringify(options.inkArgs))}'`;
     } else if (options.schema) {
       const execPrefix = useExec ? "exec " : "";
-      command = `${pidPrefix}; ${ttyPrefix}; ${execPrefix}node "${this.inkRunnerPath}" --schema '${shellEscape(JSON.stringify(options.schema))}'`;
+      command = `${pidPrefix}; ${execPrefix}node "${this.inkRunnerPath}" --schema '${shellEscape(JSON.stringify(options.schema))}'`;
       if (options.title) command += ` --title '${shellEscape(options.title)}'`;
     } else if (options.command) {
       // Wrap command to write result to events file on exit or signal
@@ -237,7 +236,6 @@ export class InteractionManager extends EventEmitter {
       const escapedId = shellEscape(id);
       command = [
         pidPrefix,
-        ttyPrefix,
         `__events=${escapedEventsFile}`,
         `__id=${escapedId}`,
         "__sent=0",

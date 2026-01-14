@@ -79,32 +79,12 @@ function createMacTerminalHost(sessionName: string): PaneHost {
       const name = options.name ?? "termos";
       const clearCommand = `printf '\\033[3J\\033[H\\033[2J'`;
       const titleCommand = `printf '\\033]0;termos:${name}\\007'`;
-      const closeScriptLines = [
-        "on run argv",
-        "set target to item 1 of argv",
-        "tell application \"Terminal\"",
-        "repeat with w in windows",
-        "repeat with t in tabs of w",
-        "if (tty of t) contains target then",
-        "close t",
-        "return",
-        "end if",
-        "end repeat",
-        "end repeat",
-        "end tell",
-        "end run",
-      ];
-      const osascriptArgs = closeScriptLines
-        .map(line => `-e \"${escapeAppleScript(line)}\"`)
-        .join(" ");
-      const closeTrap = options.closeOnExit
-        ? `__termos_close_tab() { __tty=$(tty); if [ -n \"$__tty\" ]; then osascript ${osascriptArgs} \"$__tty\" >/dev/null 2>&1; fi }; trap '__termos_close_tab' EXIT HUP INT TERM`
-        : "";
+      const ttyFile = env?.TERMOS_TTY_FILE;
       const shellCommand = buildShellCommand(
-        `cd ${shellEscape(cwd)}; ${clearCommand}; ${titleCommand}; ${closeTrap}; ${command}`,
+        `cd ${shellEscape(cwd)}; ${clearCommand}; ${titleCommand}; ${command}`,
         env
       );
-      const script = [
+      const scriptLines = [
         "tell application \"Terminal\"",
         "activate",
         "if (count of windows) is 0 then",
@@ -113,9 +93,18 @@ function createMacTerminalHost(sessionName: string): PaneHost {
         `set newTab to do script \"${escapeAppleScript(shellCommand)}\" in front window`,
         `set custom title of newTab to \"${escapeAppleScript(`termos:${name}`)}\"`,
         "set title displays custom title of newTab to true",
-        "end tell",
-      ].join("\n");
-      await execFileAsync("osascript", ["-e", script]);
+      ];
+      if (ttyFile) {
+        scriptLines.push(
+          `set ttyFile to \"${escapeAppleScript(ttyFile)}\"`,
+          "try",
+          "set tabTty to tty of newTab",
+          "do shell script \"echo \" & quoted form of tabTty & \" > \" & quoted form of ttyFile",
+          "end try"
+        );
+      }
+      scriptLines.push("end tell");
+      await execFileAsync("osascript", ["-e", scriptLines.join("\n")]);
     },
     async close(name) {
       if (!name) return;
