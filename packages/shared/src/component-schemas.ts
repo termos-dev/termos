@@ -261,6 +261,7 @@ Global Options:
   --x <0-100>                 Pane X position percentage (required for custom/command)
   --y <0-100>                 Pane Y position percentage (required for custom/command)
   Defaults (built-ins): width 40, height 50, x 60, y 5 (top-right)
+  Note: geometry is ignored when using the macOS Terminal host
 `);
 
   for (const schema of Object.values(componentSchemas)) {

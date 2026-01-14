@@ -9,7 +9,7 @@ import {
 } from "@termosdev/shared";
 import { findResultEvent } from "./events.js";
 import { ensureEventsFile, getSessionRuntimeDir } from "./runtime.js";
-import { requireZellijSession, runFloatingPane } from "./zellij.js";
+import { type PaneHost, selectPaneHost } from "./pane-hosts.js";
 
 // ESM compatibility for __dirname
 const __filename = fileURLToPath(import.meta.url);
@@ -62,10 +62,11 @@ interface InteractionManagerOptions {
   pollIntervalMs?: number;
   cwd?: string;  // Project root directory for resolving ink_file paths
   sessionName?: string;
+  host?: PaneHost;
 }
 
 /**
- * Manages interactive form/component sessions in Zellij floating panes
+ * Manages interactive form/component sessions in pane hosts (Zellij or macOS Terminal)
  */
 export class InteractionManager extends EventEmitter {
   private interactions: Map<string, InteractionState> = new Map();
@@ -74,13 +75,15 @@ export class InteractionManager extends EventEmitter {
   private pollTimers: Map<string, NodeJS.Timeout> = new Map();
   private idCounter = 0;
   private cwd: string;
+  private host: PaneHost;
   private sessionName: string;
 
   constructor(options: InteractionManagerOptions) {
     super();
     this.pollIntervalMs = options.pollIntervalMs ?? 500;
     this.cwd = options.cwd ?? process.cwd();
-    this.sessionName = options.sessionName ?? requireZellijSession();
+    this.host = options.host ?? selectPaneHost(this.cwd, options.sessionName);
+    this.sessionName = this.host.sessionName;
 
     // Find runner path relative to this module
     this.inkRunnerPath = options.inkRunnerPath ?? this.findInkRunnerPath();
@@ -215,11 +218,11 @@ export class InteractionManager extends EventEmitter {
 
     if (options.inkFile) {
       const resolvedPath = this.resolveInkFile(options.inkFile);
-      command = `${pidPrefix}; node "${this.inkRunnerPath}" --file '${shellEscape(resolvedPath)}'`;
+      command = `${pidPrefix}; exec node "${this.inkRunnerPath}" --file '${shellEscape(resolvedPath)}'`;
       if (options.title) command += ` --title '${shellEscape(options.title)}'`;
       if (options.inkArgs) command += ` --args '${shellEscape(JSON.stringify(options.inkArgs))}'`;
     } else if (options.schema) {
-      command = `${pidPrefix}; node "${this.inkRunnerPath}" --schema '${shellEscape(JSON.stringify(options.schema))}'`;
+      command = `${pidPrefix}; exec node "${this.inkRunnerPath}" --schema '${shellEscape(JSON.stringify(options.schema))}'`;
       if (options.title) command += ` --title '${shellEscape(options.title)}'`;
     } else if (options.command) {
       // Wrap command to write result to events file on exit or signal
@@ -261,13 +264,13 @@ export class InteractionManager extends EventEmitter {
     const x = options.x;
     const y = options.y;
 
-    if (width === undefined || height === undefined || x === undefined || y === undefined) {
-      throw new Error("Pane geometry required: --width --height --x --y (0-100).");
+    if (this.host.supportsGeometry) {
+      if (width === undefined || height === undefined || x === undefined || y === undefined) {
+        throw new Error("Pane geometry required: --width --height --x --y (0-100).");
+      }
     }
 
-    requireZellijSession();
-
-    await runFloatingPane(
+    await this.host.run(
       command,
       {
         name: id,
@@ -283,7 +286,7 @@ export class InteractionManager extends EventEmitter {
 
     const state: InteractionState = {
       id,
-      paneId: "floating",
+      paneId: id,
       status: "pending",
       createdAt: new Date(),
       timeoutMs: options.timeoutMs,
@@ -387,6 +390,14 @@ export class InteractionManager extends EventEmitter {
       }
     }
 
+    if (this.host.close) {
+      try {
+        await this.host.close(state.paneId);
+      } catch {
+        // Ignore close errors
+      }
+    }
+
     // Stop polling and update state
     this.stopPolling(id);
     state.status = "cancelled";
@@ -407,6 +418,13 @@ export class InteractionManager extends EventEmitter {
     }
 
     this.stopPolling(id);
+    if (state.ephemeral && this.host.close) {
+      try {
+        await this.host.close(state.paneId);
+      } catch {
+        // Ignore close errors
+      }
+    }
     if (state.pidFile) {
       try {
         fs.unlinkSync(state.pidFile);

@@ -28,9 +28,9 @@ npm link
 
 Then `termos` command is available globally.
 
-## Zellij Requirement
+## Zellij Requirement (Linux/Windows)
 
-Run Termos **inside a Zellij session**:
+Run Termos **inside a Zellij session** on Linux/Windows:
 
 ```bash
 zellij attach --create termos-dev
@@ -38,6 +38,15 @@ termos up
 termos run confirm --prompt "Smoke test?"
 ```
 `termos up` streams events and should be kept running in a separate pane to receive interaction results.
+
+## macOS Terminal Mode
+
+On macOS you can run outside Zellij (Termos will open a Terminal tab for interactions):
+
+```bash
+termos up
+termos run confirm --prompt "Smoke test?"
+```
 
 ## Testing
 

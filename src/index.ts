@@ -5,7 +5,7 @@ import * as path from "path";
 import { fileURLToPath } from "url";
 import { InteractionManager, type InteractionResult } from "./interaction-manager.js";
 import { ensureEventsFile } from "./runtime.js";
-import { requireZellijSession } from "./zellij.js";
+import { selectPaneHost } from "./pane-hosts.js";
 import { generateFullHelp, type FormSchema } from "@termosdev/shared";
 
 const DEFAULT_GEOMETRY = {
@@ -21,7 +21,7 @@ function showRunHelp(): void {
 
 function showHelp(): void {
   console.log(`
-termos - Interactive UI runner for Claude Code (Zellij required)
+termos - Interactive UI runner for Claude Code (Zellij or macOS Terminal)
 
 Usage:
   termos up                   Stream events (long-running)
@@ -33,7 +33,8 @@ Built-in components: ask, confirm, checklist, code, diff, table, progress, merma
 
 Options:
   --width/--height/--x/--y   Pane geometry (0-100). Defaults to 40x50 @ x=60,y=5 for built-ins.
-                            Required for custom components and commands.
+                            Required for custom components and commands on Zellij.
+                            Ignored in macOS Terminal mode.
   -h, --help       Show this help
 `);
 }
@@ -43,8 +44,8 @@ async function handleUp(args: string[]): Promise<void> {
     console.error("Error: --json is not supported. 'termos up' always streams.");
     process.exit(1);
   }
-  const sessionName = requireZellijSession();
-  const eventsFile = ensureEventsFile(sessionName);
+  const host = selectPaneHost(process.cwd());
+  const eventsFile = ensureEventsFile(host.sessionName);
 
   console.log("Termos up is running.");
   console.log("Streaming events for this session.");
@@ -195,15 +196,17 @@ async function handleRun(args: string[]): Promise<void> {
     if (y === undefined) y = DEFAULT_GEOMETRY.y;
   }
 
-  const sessionName = requireZellijSession();
+  const host = selectPaneHost(process.cwd());
   const paneWidth = parsePercent(width, "width");
   const paneHeight = parsePercent(height, "height");
   const paneX = parsePercent(x, "x");
   const paneY = parsePercent(y, "y");
 
-  if (paneWidth === undefined || paneHeight === undefined || paneX === undefined || paneY === undefined) {
-    emitRunError("Pane geometry required for custom components and commands: --width --height --x --y (0-100).");
-    process.exit(1);
+  if (host.supportsGeometry) {
+    if (paneWidth === undefined || paneHeight === undefined || paneX === undefined || paneY === undefined) {
+      emitRunError("Pane geometry required for custom components and commands: --width --height --x --y (0-100).");
+      process.exit(1);
+    }
   }
 
   let inkFile: string | undefined;
@@ -377,9 +380,8 @@ async function handleRun(args: string[]): Promise<void> {
       process.exit(1);
     }
 
-    const sessionName = requireZellijSession();
-    ensureEventsFile(sessionName);
-    const im = new InteractionManager({ cwd: process.cwd(), sessionName });
+    ensureEventsFile(host.sessionName);
+    const im = new InteractionManager({ cwd: process.cwd(), host });
     const id = await im.create({
       schema,
       title: cmdArgs["title"],
@@ -456,8 +458,8 @@ async function handleRun(args: string[]): Promise<void> {
     if (!Object.keys(inkArgs).length) inkArgs = undefined;
   }
 
-  ensureEventsFile(sessionName);
-  const im = new InteractionManager({ cwd: process.cwd(), sessionName });
+  ensureEventsFile(host.sessionName);
+  const im = new InteractionManager({ cwd: process.cwd(), host });
   const componentName = sepIdx !== -1 ? undefined : component;
   const id = await im.create({
     inkFile,

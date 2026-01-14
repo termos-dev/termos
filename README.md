@@ -34,13 +34,14 @@ Restart Codex after installing.
 
 ## Requirements
 
-- Zellij must be running. All Termos commands must be executed **inside a Zellij session**.
-- Pane geometry is required for custom components and commands. Built-ins default to
-  width 40, height 50, x 60, y 5 (top-right) when omitted.
+- Zellij is required on Linux/Windows. On macOS, Termos can also run outside Zellij and will open
+  new Terminal tabs for interactions.
+- Pane geometry is required for custom components and commands when using Zellij. Built-ins default to
+  width 40, height 50, x 60, y 5 (top-right) when omitted. Geometry is ignored in macOS Terminal mode.
 
 ## Quick Start
 
-1. Start or attach to a Zellij session:
+1. Start or attach to a Zellij session (recommended):
 
 ```bash
 zellij attach --create my-session
@@ -61,6 +62,20 @@ termos run confirm --prompt "Proceed?"
 ```
 
 Defaults for built-ins: `--width 40 --height 50 --x 60 --y 5`.
+
+macOS Terminal mode (no Zellij):
+
+```bash
+termos up
+termos run confirm --prompt "Proceed?"
+```
+
+If you run `termos up` and `termos run` from different directories, set a shared session name:
+
+```bash
+TERMOS_SESSION_NAME=my-session termos up
+TERMOS_SESSION_NAME=my-session termos run confirm --prompt "Proceed?"
+```
 
 ## CLI Commands
 
