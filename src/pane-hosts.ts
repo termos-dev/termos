@@ -1,13 +1,10 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
 import * as path from "path";
-import * as fs from "fs";
-import { getSessionRuntimeDir, normalizeSessionName } from "./runtime.js";
+import { normalizeSessionName } from "./runtime.js";
 import { runFloatingPane } from "./zellij.js";
 
 const execFileAsync = promisify(execFile);
-
-const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 export interface PaneRunOptions {
   name?: string;
@@ -79,9 +76,11 @@ function createMacTerminalHost(sessionName: string): PaneHost {
       const name = options.name ?? "termos";
       const clearCommand = `printf '\\033[3J\\033[H\\033[2J'`;
       const titleCommand = `printf '\\033]0;termos:${name}\\007'`;
-      const ttyFile = env?.TERMOS_TTY_FILE;
+      const closeNote = options.closeOnExit
+        ? `; printf '\\n[termos] Pane closed. Please close this tab/window.\\n'`
+        : "";
       const shellCommand = buildShellCommand(
-        `cd ${shellEscape(cwd)}; ${clearCommand}; ${titleCommand}; ${command}`,
+        `cd ${shellEscape(cwd)}; ${clearCommand}; ${titleCommand}; ${command}${closeNote}`,
         env
       );
       const scriptLines = [
@@ -94,98 +93,8 @@ function createMacTerminalHost(sessionName: string): PaneHost {
         `set custom title of newTab to \"${escapeAppleScript(`termos:${name}`)}\"`,
         "set title displays custom title of newTab to true",
       ];
-      if (ttyFile) {
-        scriptLines.push(
-          `set ttyFile to \"${escapeAppleScript(ttyFile)}\"`,
-          "try",
-          "set tabTty to tty of newTab",
-          "do shell script \"echo \" & quoted form of tabTty & \" > \" & quoted form of ttyFile",
-          "end try"
-        );
-      }
       scriptLines.push("end tell");
       await execFileAsync("osascript", ["-e", scriptLines.join("\n")]);
-    },
-    async close(name) {
-      if (!name) return;
-      const ttyFile = path.join(getSessionRuntimeDir(sessionName), `tty-${name}.txt`);
-      let tty: string | undefined;
-      try {
-        tty = fs.readFileSync(ttyFile, "utf-8").trim();
-      } catch {
-        tty = undefined;
-      }
-      const target = `termos:${name}`;
-      const closeScript = [
-        "tell application \"Terminal\"",
-        "set closed to false",
-        "repeat with w in windows",
-        "repeat with t in tabs of w",
-        ...(tty ? [
-          `if (tty of t) contains \"${escapeAppleScript(tty)}\" then`,
-          "close t",
-          "set closed to true",
-          "exit repeat",
-          "end if",
-        ] : []),
-        "set tabTitle to \"\"",
-        "try",
-        "set tabTitle to custom title of t",
-        "end try",
-        `if tabTitle is \"${escapeAppleScript(target)}\" then`,
-        "close t",
-        "set closed to true",
-        "exit repeat",
-        "end if",
-        `if (name of t) contains \"${escapeAppleScript(target)}\" then`,
-        "close t",
-        "set closed to true",
-        "exit repeat",
-        "end if",
-        "end repeat",
-        "if closed then exit repeat",
-        "end repeat",
-        "if not closed then",
-        "try",
-        "set w to front window",
-        "if (count of tabs of w) is 1 then",
-        "set t to first tab of w",
-        `if (name of t) contains \"${escapeAppleScript(target)}\" then`,
-        "close w",
-        "set closed to true",
-        "end if",
-        "end if",
-        "end try",
-        "end if",
-        "if closed then return \"closed\"",
-        "return \"not_closed\"",
-        "end tell",
-      ].join("\n");
-      let closed = false;
-      for (let attempt = 0; attempt < 2; attempt += 1) {
-        const { stdout } = await execFileAsync("osascript", ["-e", closeScript]);
-        if (stdout.trim() === "closed") {
-          closed = true;
-          break;
-        }
-        await sleep(200);
-      }
-      if (!closed) {
-        const message = "[termos] Pane closed. Please close this tab/window.";
-        const notifyScript = [
-          "tell application \"Terminal\"",
-          "repeat with w in windows",
-          "repeat with t in tabs of w",
-          ...(tty ? [`if (tty of t) contains \"${escapeAppleScript(tty)}\" then`] : [`if (name of t) contains \"${escapeAppleScript(target)}\" then`]),
-          `do script \"printf '\\\\n${escapeAppleScript(message)}\\\\n'\" in t`,
-          "return",
-          "end if",
-          "end repeat",
-          "end repeat",
-          "end tell",
-        ].join("\n");
-        await execFileAsync("osascript", ["-e", notifyScript]);
-      }
     },
   };
   return host;

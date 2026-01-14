@@ -38,7 +38,6 @@ export interface InteractionState {
   timeoutMs?: number;
   ephemeral?: boolean;  // If true, kill pane when result detected
   pidFile?: string;
-  ttyFile?: string;
 }
 
 export interface CreateInteractionOptions {
@@ -208,11 +207,9 @@ export class InteractionManager extends EventEmitter {
     const id = options.id ?? this.generateId();
     const eventsFile = this.getEventsFile();
     const pidFile = path.join(getSessionRuntimeDir(this.sessionName), `pid-${id}.txt`);
-    const ttyFile = path.join(getSessionRuntimeDir(this.sessionName), `tty-${id}.txt`);
     const env = {
       ...buildInteractionEnv(id, eventsFile),
       TERMOS_PID_FILE: pidFile,
-      TERMOS_TTY_FILE: ttyFile,
     };
     const shellEscape = (s: string) => s.replace(/'/g, "'\\''");
     const pidPrefix = 'if [ -n "$TERMOS_PID_FILE" ]; then echo $$ > "$TERMOS_PID_FILE"; fi';
@@ -298,7 +295,6 @@ export class InteractionManager extends EventEmitter {
       timeoutMs: options.timeoutMs,
       ephemeral,
       pidFile,
-      ttyFile,
     };
 
     this.interactions.set(id, state);
@@ -435,13 +431,6 @@ export class InteractionManager extends EventEmitter {
     if (state.pidFile) {
       try {
         fs.unlinkSync(state.pidFile);
-      } catch {
-        // Ignore
-      }
-    }
-    if (state.ttyFile) {
-      try {
-        fs.unlinkSync(state.ttyFile);
       } catch {
         // Ignore
       }
