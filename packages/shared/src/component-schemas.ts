@@ -33,9 +33,9 @@ export const componentSchemas: Record<string, ComponentSchema> = {
       answers: "Record<header, value> - answers keyed by question header",
     },
     examples: [
-      'termos run ask --prompt "What is your name?" --placeholder "Enter your name..."',
-      'termos run ask --prompt "Favorite language?" --options "TypeScript,Python,Go"',
-      'termos run ask --questions \'[{"question":"Name?","options":["Alice","Bob"]}]\'',
+      'termos run --title "Question" ask --prompt "What is your name?" --placeholder "Enter your name..."',
+      'termos run --title "Question" ask --prompt "Favorite language?" --options "TypeScript,Python,Go"',
+      'termos run --title "Question" ask --questions \'[{"question":"Name?","options":["Alice","Bob"]}]\'',
     ],
   },
 
@@ -52,8 +52,8 @@ export const componentSchemas: Record<string, ComponentSchema> = {
       confirmed: "boolean - true if user selected yes",
     },
     examples: [
-      'termos run confirm --prompt "Delete all files?"',
-      'termos run confirm --prompt "Continue?" --yes "Proceed" --no "Abort"',
+      'termos run --title "Confirm" confirm --prompt "Delete all files?"',
+      'termos run --title "Confirm" confirm --prompt "Continue?" --yes "Proceed" --no "Abort"',
     ],
   },
 
@@ -71,8 +71,8 @@ export const componentSchemas: Record<string, ComponentSchema> = {
       checkedLabels: "string[] - labels of checked items",
     },
     examples: [
-      'termos run checklist --items "Build,Test,Deploy"',
-      'termos run checklist --items "A,B,C" --checked "0,2" --title "Select"',
+      'termos run --title "Checklist" checklist --items "Build,Test,Deploy"',
+      'termos run --title "Checklist" checklist --items "A,B,C" --checked "0,2"',
     ],
   },
 
@@ -89,8 +89,8 @@ export const componentSchemas: Record<string, ComponentSchema> = {
       file: "string - path to file",
     },
     examples: [
-      'termos run code --file src/index.ts',
-      'termos run code --file src/app.tsx --highlight "15-25" --line 15',
+      'termos run --title "Code" code --file src/index.ts',
+      'termos run --title "Code" code --file src/app.tsx --highlight "15-25" --line 15',
     ],
   },
 
@@ -107,9 +107,9 @@ export const componentSchemas: Record<string, ComponentSchema> = {
       action: "accept",
     },
     examples: [
-      'termos run diff --file src/index.ts',
-      'termos run diff --file src/index.ts --staged',
-      'termos run diff --before old.txt --after new.txt',
+      'termos run --title "Diff" diff --file src/index.ts',
+      'termos run --title "Diff" diff --file src/index.ts --staged',
+      'termos run --title "Diff" diff --before old.txt --after new.txt',
     ],
   },
 
@@ -124,8 +124,8 @@ export const componentSchemas: Record<string, ComponentSchema> = {
       action: "accept",
     },
     examples: [
-      'termos run table --file data.json',
-      'termos run table --file data.csv --columns "name,status,date"',
+      'termos run --title "Table" table --file data.json',
+      'termos run --title "Table" table --file data.csv --columns "name,status,date"',
     ],
   },
 
@@ -140,8 +140,8 @@ export const componentSchemas: Record<string, ComponentSchema> = {
       action: "accept",
     },
     examples: [
-      'termos run progress --steps "Build,Test,Deploy"',
-      'termos run progress --steps "Step 1,Step 2" --title "Installation"',
+      'termos run --title "Progress" progress --steps "Build,Test,Deploy"',
+      'termos run --title "Progress" progress --steps "Step 1,Step 2"',
     ],
   },
 
@@ -156,8 +156,8 @@ export const componentSchemas: Record<string, ComponentSchema> = {
       action: "accept",
     },
     examples: [
-      'termos run mermaid --file diagram.mmd',
-      'termos run mermaid --code "flowchart LR; A-->B-->C"',
+      'termos run --title "Mermaid" mermaid --file diagram.mmd',
+      'termos run --title "Mermaid" mermaid --code "flowchart LR; A-->B-->C"',
     ],
   },
 
@@ -173,8 +173,8 @@ export const componentSchemas: Record<string, ComponentSchema> = {
       file: "string - path to file",
     },
     examples: [
-      'termos run markdown --file README.md',
-      'termos run markdown --file plan.md --title "Implementation Plan"',
+      'termos run --title "Markdown" markdown --file README.md',
+      'termos run --title "Markdown" markdown --file plan.md',
     ],
   },
 
@@ -189,7 +189,121 @@ export const componentSchemas: Record<string, ComponentSchema> = {
       result: "{ approved: boolean, file?: string }",
     },
     examples: [
-      'termos run plan-viewer --file /path/to/plan.md',
+      'termos run --title "Plan" plan-viewer --file /path/to/plan.md',
+    ],
+  },
+
+  chart: {
+    name: "chart",
+    description: "Terminal charts (bar, sparkline, line, stacked)",
+    args: {
+      file: { type: "string", description: "Path to JSON or CSV data file" },
+      data: { type: "json", description: "Inline JSON data array" },
+      type: { type: "string", default: "bar", description: "Chart type: bar | sparkline | line | stacked" },
+      title: { type: "string", description: "Chart title" },
+      height: { type: "number", default: "8", description: "Chart height in rows (for line graphs)" },
+      sort: { type: "string", default: "none", description: "Sort order: none | asc | desc (for bar charts)" },
+      showValues: { type: "boolean", default: "true", description: "Show values next to bars" },
+    },
+    returns: {
+      action: "accept",
+      type: "string - chart type used",
+    },
+    examples: [
+      'termos run --title "Sales" chart --file data.json',
+      'termos run --title "Trend" chart --data "[5,10,15,8,12]" --type sparkline',
+      'termos run --title "Revenue" chart --file sales.csv --type bar --sort desc',
+      'termos run --title "Languages" chart --data \'[{"label":"TS","value":60},{"label":"JS","value":30}]\' --type stacked',
+    ],
+  },
+
+  select: {
+    name: "select",
+    description: "Single-item picker with optional fuzzy search",
+    args: {
+      items: { type: "string", required: true, description: "Comma-separated items or JSON array" },
+      title: { type: "string", description: "Title above list" },
+      search: { type: "boolean", default: "false", description: "Enable fuzzy search filtering" },
+      file: { type: "string", description: "JSON file with items array" },
+    },
+    returns: {
+      action: "accept | cancel",
+      selected: "string - selected item value",
+      selectedLabel: "string - selected item label",
+      selectedIndex: "number - index of selected item",
+    },
+    examples: [
+      'termos run --title "Select" select --items "Option A,Option B,Option C"',
+      'termos run --title "Select" select --items \'[{"label":"Node","value":"node"},{"label":"Python","value":"python"}]\' --search true',
+      'termos run --title "Select" select --file options.json --search true',
+    ],
+  },
+
+  tree: {
+    name: "tree",
+    description: "Directory/hierarchy tree viewer with expand/collapse",
+    args: {
+      path: { type: "string", description: "Directory path to display (default: cwd)" },
+      file: { type: "string", description: "JSON file with tree structure" },
+      depth: { type: "number", default: "5", description: "Max depth to show" },
+      showHidden: { type: "boolean", default: "false", description: "Show hidden files" },
+      title: { type: "string", description: "Title above tree" },
+    },
+    returns: {
+      action: "accept | cancel",
+      selected: "string - path of selected item",
+      type: "string - 'file' or 'directory'",
+    },
+    examples: [
+      'termos run --title "Tree" tree',
+      'termos run --title "Tree" tree --path ./src --depth 3',
+      'termos run --title "Tree" tree --path . --showHidden true',
+    ],
+  },
+
+  json: {
+    name: "json",
+    description: "Interactive JSON explorer with collapsible nodes",
+    args: {
+      file: { type: "string", description: "Path to JSON file" },
+      data: { type: "json", description: "Inline JSON data" },
+      title: { type: "string", description: "Title above viewer" },
+      expandDepth: { type: "number", default: "2", description: "Initial expand depth" },
+    },
+    returns: {
+      action: "accept | cancel",
+    },
+    examples: [
+      'termos run --title "JSON" json --file config.json',
+      'termos run --title "JSON" json --data \'{"name":"test","items":[1,2,3]}\'',
+      'termos run --title "JSON" json --file data.json --expandDepth 1',
+    ],
+  },
+
+  gauge: {
+    name: "gauge",
+    description: "Visual meter/progress indicator for single values",
+    args: {
+      value: { type: "number", description: "Current value" },
+      min: { type: "number", default: "0", description: "Minimum value" },
+      max: { type: "number", default: "100", description: "Maximum value" },
+      label: { type: "string", description: "Gauge label" },
+      unit: { type: "string", default: "%", description: "Unit suffix (%, MB, °C, etc.)" },
+      style: { type: "string", default: "bar", description: "Style: bar | arc | blocks | dots" },
+      thresholds: { type: "json", description: 'Color thresholds: {"warning":70,"danger":90}' },
+      file: { type: "string", description: "JSON file to watch for value updates" },
+      data: { type: "json", description: "JSON with single or multiple gauges" },
+      title: { type: "string", description: "Title above gauge" },
+    },
+    returns: {
+      action: "accept",
+      gauges: "array of {value, label} for each gauge",
+    },
+    examples: [
+      'termos run --title "CPU" gauge --value 75 --label "CPU Usage"',
+      'termos run --title "Memory" gauge --value 8 --max 16 --unit "GB" --style blocks',
+      'termos run --title "Temp" gauge --value 65 --unit "°C" --thresholds \'{"warning":60,"danger":80}\'',
+      'termos run --title "Stats" gauge --data \'[{"label":"CPU","value":45},{"label":"Memory","value":72}]\'',
     ],
   },
 };
@@ -208,8 +322,7 @@ export function generateComponentHelp(schema: ComponentSchema): string {
     .filter(([_, arg]) => arg.required)
     .map(([name, _]) => `--${name} <value>`)
     .join(' ');
-  const geometryFlags = "[--width <0-100> --height <0-100> --x <0-100> --y <0-100>]";
-  lines.push(`  Usage: termos run ${geometryFlags} ${schema.name} ${requiredArgs}`.trimEnd());
+  lines.push(`  Usage: termos run --title "<text>" ${schema.name} ${requiredArgs}`.trimEnd());
   lines.push('');
 
   // Options
@@ -248,21 +361,32 @@ export function generateFullHelp(): string {
   sections.push(`termos run - Run interactive components
 
 Usage:
-  termos run <component> [options]    Run a built-in or custom component
-  termos run -- <command>             Run a shell command in a floating pane
-  termos run --help                   Show this help
+  termos run <component> [options]           Run a built-in or custom component
+  termos run --cmd "<command>"               Run a shell command (recommended for agents)
+  termos run --cmd-file <path>               Run a shell command from file
+  termos run -- <command>                    Run a shell command (passthrough)
+  termos run --help                          Show this help
+
+Command Execution:
+  Use --cmd for commands with shell operators (&&, |, ||):
+    termos run --title "Build" --cmd "npm run build && echo Done"
+    termos run --title "Deploy" --cmd "ssh user@host 'deploy.sh && restart'"
+  Use --cmd-file for complex multi-line scripts:
+    termos run --title "Setup" --cmd-file ./scripts/setup.sh
+  Use -- passthrough for simple commands (no operators):
+    termos run --title "List" -- ls -la
 
 Global Options:
-  --session <name>            Session name (required outside Zellij; overrides TERMOS_SESSION_NAME)
-  --title "Text"              Display a title header above the component
-  --wait                      Wait for component to complete (optional)
-  --no-wait                   Return immediately with interaction ID (default)
-  --width <0-100>             Pane width percentage (required for custom/command)
-  --height <0-100>            Pane height percentage (required for custom/command)
-  --x <0-100>                 Pane X position percentage (required for custom/command)
-  --y <0-100>                 Pane Y position percentage (required for custom/command)
-  Defaults (built-ins): width 40, height 50, x 60, y 5 (top-right)
-  Note: geometry is ignored when using Ghostty or the macOS Terminal host
+  --session <name>            Session name (auto-generated from dir name on macOS; required on Linux/Windows outside Zellij)
+  --title "Text"              Title (required)
+  --cmd "Command"             Inline shell command (supports &&, |, ||, etc.)
+  --cmd-file <path>           Read command from file
+  --position <preset>         Pane position preset (default: floating for components, tab for commands)
+                              Floating: floating, floating:center, floating:top-left, floating:top-right,
+                                        floating:bottom-left, floating:bottom-right
+                              Split (Zellij only): split, split:right, split:down
+                              Tab: tab
+  Note: split positions only work in Zellij; other hosts fall back to a new window/tab
 `);
 
   for (const schema of Object.values(componentSchemas)) {
@@ -276,11 +400,12 @@ Global Options:
   sections.push('');
   sections.push(`Custom Components:
 
-  Usage: termos run --width <0-100> --height <0-100> --x <0-100> --y <0-100> ./my-component.tsx [--key value]
+  Usage: termos run --title "<text>" ./my-component.tsx [--key value]
 
   Create .tsx files with a default export React component.
   Use global onComplete(result) to return data.
   Pass arguments via --key value flags.
+  Use --position to control placement (default: floating).
 `);
 
   return sections.join('\n');

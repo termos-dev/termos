@@ -1,12 +1,12 @@
-Run a comprehensive demo of all termos interactive components. For every `termos run` command, include `--width 80 --height 60 --x 10 --y 20`. Use each of these in sequence:
+Run a comprehensive demo of all termos interactive components. Use `--position floating:center` for visibility. Use each of these in sequence:
 
-1. First, use `termos run confirm` to ask if user wants to proceed with the demo
-2. Use `termos run ask --questions '[{"question":"Project name?","options":["App A","App B"]}]'` to gather project preferences
-3. Use `termos run checklist` with items "Build project,Run tests,Deploy,Send notifications" to let user select tasks
-4. Use `termos run progress` with steps "Initialize,Build,Test,Package,Deploy" to show build progress
-5. Use `termos run table` with /workspace/demo/data.json to display team data
-6. Use `termos run code` with /workspace/demo/sample-code.ts highlighting lines 12-18
-7. Use `termos run markdown` with /workspace/demo/plan.md to show the implementation plan
-8. Use `termos run mermaid` with /workspace/demo/diagram.mmd to render the flowchart
+1. First, use `termos run --title "Confirm" --position floating:center confirm` to ask if user wants to proceed with the demo
+2. Use `termos run --title "Project Setup" --position floating:center ask --questions '[{"question":"Project name?","options":["App A","App B"]}]'` to gather project preferences
+3. Use `termos run --title "Checklist" --position floating:center checklist` with items "Build project,Run tests,Deploy,Send notifications" to let user select tasks
+4. Use `termos run --title "Progress" --position floating:center progress` with steps "Initialize,Build,Test,Package,Deploy" to show build progress
+5. Use `termos run --title "Team Table" --position floating:center table` with /workspace/demo/data.json to display team data
+6. Use `termos run --title "Code" --position floating:center code` with /workspace/demo/sample-code.ts highlighting lines 12-18
+7. Use `termos run --title "Plan" --position floating:center markdown` with /workspace/demo/plan.md to show the implementation plan
+8. Use `termos run --title "Diagram" --position floating:center mermaid` with /workspace/demo/diagram.mmd to render the flowchart
 
 Run each component one by one and briefly explain what each demonstrates. This showcases the full termos interactive capabilities!

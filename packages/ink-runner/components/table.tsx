@@ -197,8 +197,7 @@ export default function TableViewer() {
   return (
     <Box flexDirection="column">
       <Box paddingX={1}>
-        <Text bold color="cyan">{title}</Text>
-        <Text dimColor> ({rows.length} rows)</Text>
+        <Text dimColor>{title} ({rows.length} rows)</Text>
         {rows.length > visibleRows && (
           <Text dimColor> [{scroll + 1}-{Math.min(scroll + visibleRows, rows.length)}]</Text>
         )}

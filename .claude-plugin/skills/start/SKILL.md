@@ -29,19 +29,42 @@ termos up
 
 `termos up` streams events and should be kept running as a background/base process (avoid shell `&`).
 
+## Learn Available Components
+
+Run `termos --help` to see all available components and project-specific instructions (from `.termos/termos.md`).
+
 ## Usage Guidance
 
 Overuse `termos run` in async mode to keep the user engaged and inside the screen.
-Built-in components can omit geometry and default to
-`--width 40 --height 50 --x 60 --y 5`.
-Custom components and `termos run -- <command>` require `--width --height --x --y` (0-100).
-Use non-overlapping regions (percent-of-screen) and avoid bottom-left:
-- Top-right: `--width 40 --height 45 --x 60 --y 5`
-- Bottom-right: `--width 40 --height 45 --x 60 --y 55`
-- Top-left: `--width 40 --height 45 --x 0 --y 5`
+`--title` is required for all `termos run` invocations.
 
-Before creating or editing custom interactive files, run:
+## Position Presets
+
+Use `--position <preset>` to control where interactions appear:
+
+**Floating (overlay panes):**
+- `floating` - Top-right (default for components)
+- `floating:center` - Centered
+- `floating:top-left`, `floating:top-right`
+- `floating:bottom-left`, `floating:bottom-right`
+
+**Split (Zellij only):**
+- `split` - Auto-detect direction
+- `split:right` - Side-by-side
+- `split:down` - Stacked
+
+**Tab:**
+- `tab` - New tab (default for commands)
+
+Examples:
 ```bash
-termos run --help
+# Floating (default for components)
+termos run --title "Confirm" confirm --prompt "Proceed?"
+
+# Split pane (Zellij only)
+termos run --title "Review" --position split confirm --prompt "Approve?"
+
+# Tab for commands
+termos run --title "Server" -- npm start
 ```
-Use it to review all built-in components and instructions. Verify and confirm the target file(s) before changing files.
+

@@ -1,5 +1,5 @@
-import { Box, Text, useInput, useApp, useStdout } from 'ink';
-import { useState, useEffect } from 'react';
+import { Box, Text, useInput, useApp, useStdout, useStdin } from 'ink';
+import { useState, useEffect, useCallback } from 'react';
 import { readFileSync } from 'fs';
 import * as path from 'path';
 
@@ -32,6 +32,30 @@ function getLanguage(filePath: string): string {
     '.md': 'markdown', '.yml': 'yaml', '.yaml': 'yaml', '.sh': 'bash',
   };
   return langMap[ext] || 'text';
+}
+
+// Scroll indicator bar component
+function ScrollBar({ position, height }: { position: number; height: number }) {
+  const trackHeight = Math.max(3, height);
+  const thumbSize = Math.max(1, Math.floor(trackHeight * 0.2));
+  const thumbPos = Math.floor(position * (trackHeight - thumbSize));
+
+  const chars: string[] = [];
+  for (let i = 0; i < trackHeight; i++) {
+    if (i >= thumbPos && i < thumbPos + thumbSize) {
+      chars.push('█');
+    } else {
+      chars.push('░');
+    }
+  }
+
+  return (
+    <Box flexDirection="column" marginLeft={1}>
+      {chars.map((char, i) => (
+        <Text key={i} color="gray">{char}</Text>
+      ))}
+    </Box>
+  );
 }
 
 function highlightLine(line: string, lang: string): React.ReactNode[] {
@@ -85,6 +109,7 @@ function highlightLine(line: string, lang: string): React.ReactNode[] {
 export default function CodeViewer() {
   const { exit } = useApp();
   const { stdout } = useStdout();
+  const { stdin, setRawMode } = useStdin();
 
   const filePath = args?.file;
   const title = args?.title || (filePath ? path.basename(filePath) : 'Code');
@@ -94,6 +119,7 @@ export default function CodeViewer() {
   const [lines, setLines] = useState<string[]>([]);
   const [scroll, setScroll] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [maxScroll, setMaxScroll] = useState(0);
 
   // Parse highlight range
   const highlightStart = highlightRange
@@ -126,10 +152,60 @@ export default function CodeViewer() {
     }
   }, [filePath]);
 
-  const visibleLines = stdout?.rows ? Math.max(5, stdout.rows - 5) : 20;
-  const maxScroll = Math.max(0, lines.length - visibleLines);
+  const visibleLines = stdout?.rows ? Math.max(5, stdout.rows - 6) : 20;
   const lang = filePath ? getLanguage(filePath) : 'text';
   const lineNumWidth = String(lines.length).length;
+
+  // Update maxScroll when lines or visibleLines change
+  useEffect(() => {
+    setMaxScroll(Math.max(0, lines.length - visibleLines));
+  }, [lines.length, visibleLines]);
+
+  // Mouse scroll support
+  const handleScroll = useCallback((direction: 'up' | 'down') => {
+    setScroll(s => {
+      if (direction === 'up') return Math.max(0, s - 3);
+      return Math.min(maxScroll, s + 3);
+    });
+  }, [maxScroll]);
+
+  useEffect(() => {
+    if (!stdin || !setRawMode) return;
+
+    // Enable mouse tracking (SGR 1006 mode for better compatibility)
+    process.stdout.write('\x1b[?1000h'); // Enable mouse click tracking
+    process.stdout.write('\x1b[?1006h'); // Enable SGR extended mode
+
+    const handleData = (data: Buffer) => {
+      const str = data.toString();
+
+      // Parse SGR mouse sequences: \x1b[<button;x;y;M or m
+      // Button 64 = scroll up, 65 = scroll down
+      const sgrMatch = str.match(/\x1b\[<(\d+);(\d+);(\d+)([Mm])/);
+      if (sgrMatch) {
+        const button = parseInt(sgrMatch[1], 10);
+        if (button === 64) handleScroll('up');
+        else if (button === 65) handleScroll('down');
+        return;
+      }
+
+      // Parse legacy mouse sequences: \x1b[M followed by 3 bytes
+      if (str.startsWith('\x1b[M') && str.length >= 6) {
+        const button = str.charCodeAt(3) - 32;
+        if (button === 64) handleScroll('up');
+        else if (button === 65) handleScroll('down');
+      }
+    };
+
+    stdin.on('data', handleData);
+
+    return () => {
+      // Disable mouse tracking on cleanup
+      process.stdout.write('\x1b[?1006l');
+      process.stdout.write('\x1b[?1000l');
+      stdin.off('data', handleData);
+    };
+  }, [stdin, setRawMode, handleScroll]);
 
   useInput((input, key) => {
     if (input === 'q' || key.escape) {
@@ -174,37 +250,46 @@ export default function CodeViewer() {
   }
 
   const displayLines = lines.slice(scroll, scroll + visibleLines);
+  const scrollPosition = maxScroll > 0 ? scroll / maxScroll : 0;
+  const showScrollBar = lines.length > visibleLines;
 
   return (
     <Box flexDirection="column">
       <Box paddingX={1}>
         <Text bold color="cyan">{title}</Text>
         <Text dimColor> [{lang}]</Text>
-        {lines.length > visibleLines && (
+        {showScrollBar && (
           <Text dimColor> ({scroll + 1}-{Math.min(scroll + visibleLines, lines.length)}/{lines.length})</Text>
         )}
       </Box>
 
-      <Box flexDirection="column" paddingX={1}>
-        {displayLines.map((line, displayIdx) => {
-          const lineNum = scroll + displayIdx + 1;
-          const isHighlighted = highlightStart !== undefined &&
-            lineNum >= highlightStart &&
-            lineNum <= (highlightEnd || highlightStart);
+      <Box flexDirection="row">
+        <Box flexDirection="column" paddingX={1} flexGrow={1}>
+          {displayLines.map((line, displayIdx) => {
+            const lineNum = scroll + displayIdx + 1;
+            const isHighlighted = highlightStart !== undefined &&
+              lineNum >= highlightStart &&
+              lineNum <= (highlightEnd || highlightStart);
 
-          return (
-            <Box key={displayIdx}>
-              <Text color="gray">{String(lineNum).padStart(lineNumWidth, ' ')} │ </Text>
-              <Text inverse={isHighlighted} color={isHighlighted ? 'yellow' : undefined}>
-                {highlightLine(line, lang)}
-              </Text>
-            </Box>
-          );
-        })}
+            return (
+              <Box key={displayIdx}>
+                <Text color="gray">{String(lineNum).padStart(lineNumWidth, ' ')} │ </Text>
+                <Text inverse={isHighlighted} color={isHighlighted ? 'yellow' : undefined}>
+                  {highlightLine(line, lang)}
+                </Text>
+              </Box>
+            );
+          })}
+        </Box>
+
+        {showScrollBar && (
+          <ScrollBar position={scrollPosition} height={displayLines.length} />
+        )}
       </Box>
 
       <Box paddingX={1}>
         <Text dimColor>↑↓/jk=scroll  g/G=top/bottom  PgUp/PgDn  q=close</Text>
+        {showScrollBar && <Text dimColor>  🖱️=scroll</Text>}
       </Box>
     </Box>
   );

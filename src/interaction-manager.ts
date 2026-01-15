@@ -9,7 +9,7 @@ import {
 } from "@termosdev/shared";
 import { findResultEvent } from "./events.js";
 import { ensureEventsFile, getSessionRuntimeDir } from "./runtime.js";
-import { type PaneHost, selectPaneHost } from "./pane-hosts.js";
+import { type PaneHost, selectPaneHost, type PositionPreset } from "./pane-hosts.js";
 
 // ESM compatibility for __dirname
 const __filename = fileURLToPath(import.meta.url);
@@ -50,11 +50,8 @@ export interface CreateInteractionOptions {
   command?: string;  // Arbitrary command to run
   title?: string;
   timeoutMs?: number;
-  usePopup?: boolean;  // Kept for API compatibility (floating panes are always used)
-  width?: string;
-  height?: string;
-  x?: string;
-  y?: string;
+  position?: PositionPreset;  // Position preset (floating, split, tab, etc.)
+  heightPercent?: number;     // Override height (percentage of terminal)
 }
 
 interface InteractionManagerOptions {
@@ -273,9 +270,16 @@ export class InteractionManager extends EventEmitter {
         "trap '__emit cancel' EXIT INT TERM HUP",
         options.command,
         "code=$?",
+        // Show exit notification and wait for user to acknowledge
+        "echo ''",
+        "if [ $code -eq 0 ]; then echo '✓ Command completed successfully'; else echo '✗ Command failed (exit code: '$code')'; fi",
+        "echo 'Files may have changed.'",
+        "echo ''",
+        "echo 'Press Enter to close...'",
+        "read __dummy",
         "if [ $code -eq 0 ]; then __emit accept '{\"exitCode\":'$code'}'; else __emit decline '{\"exitCode\":'$code'}'; fi",
         "trap - EXIT INT TERM HUP",
-      ].join("; ");
+      ].join("\n");
     } else {
       throw new Error("Either schema, inkFile, or command is required");
     }
@@ -284,28 +288,15 @@ export class InteractionManager extends EventEmitter {
     // Persistent: shell commands (-- <cmd>) stay visible for output review
     const ephemeral = !!(options.inkFile || options.schema);
 
-    const width = options.width;
-    const height = options.height;
-    const x = options.x;
-    const y = options.y;
-
-    if (this.host.supportsGeometry) {
-      if (width === undefined || height === undefined || x === undefined || y === undefined) {
-        throw new Error("Pane geometry required: --width --height --x --y (0-100).");
-      }
-    }
-
     const paneName = getPaneName();
     await this.host.run(
       command,
       {
         name: paneName,
         cwd: this.cwd,
-        width,
-        height,
-        x,
-        y,
+        position: options.position ?? "floating",
         closeOnExit: ephemeral,
+        heightPercent: options.heightPercent,
       },
       env
     );

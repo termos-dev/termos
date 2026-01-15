@@ -1,19 +1,16 @@
 #!/usr/bin/env node
 
 import * as fs from "fs";
+import * as os from "os";
 import * as path from "path";
 import { fileURLToPath } from "url";
 import { InteractionManager, type InteractionResult } from "./interaction-manager.js";
 import { ensureEventsFile } from "./runtime.js";
-import { selectPaneHost } from "./pane-hosts.js";
+import { selectPaneHost, VALID_POSITIONS, type PositionPreset } from "./pane-hosts.js";
 import { generateFullHelp, type FormSchema } from "@termosdev/shared";
-
-const DEFAULT_GEOMETRY = {
-  width: "40",
-  height: "50",
-  x: "60",
-  y: "5",
-};
+import { startCommandWatcher, type ParseMode } from "./command-watcher.js";
+import { getComponentHeight, rowsToPercent } from "./height-calculator.js";
+import { loadMergedInstructions } from "./instructions-loader.js";
 
 function showRunHelp(): void {
   console.log(generateFullHelp());
@@ -24,20 +21,44 @@ function showHelp(): void {
 termos - Interactive UI runner for Claude Code (Zellij, Ghostty, or macOS Terminal)
 
 Usage:
-  termos up [--session <name>]                   Stream events (long-running)
+  termos up [--session <name>]                     Stream events (long-running)
 
-  termos run [--session <name>] <component>      Run an Ink component (built-in or custom .tsx)
-  termos run [--session <name>] -- <command>     Run a shell command in a floating pane
+  termos run --title <text> <component>            Run an Ink component (built-in or custom .tsx)
+  termos run --title <text> --cmd "<command>"      Run a shell command (recommended for agents)
+  termos run --title <text> --cmd-file <path>      Run a shell command from file
+  termos run --title <text> -- <command>           Run a shell command (passthrough)
 
-Built-in components: ask, confirm, checklist, code, diff, table, progress, mermaid, markdown, plan-viewer
+Built-in components: ask, confirm, checklist, code, diff, table, progress, mermaid, markdown,
+                     plan-viewer, chart, select, tree, json, gauge
 
 Options:
-  --session <name>  Session name (required outside Zellij; overrides TERMOS_SESSION_NAME)
-  --width/--height/--x/--y   Pane geometry (0-100). Defaults to 40x50 @ x=60,y=5 for built-ins.
-                            Required for custom components and commands on Zellij.
-                            Ignored in macOS Terminal mode.
-  -h, --help       Show this help
+  --session <name>      Session name (required outside Zellij; overrides TERMOS_SESSION_NAME)
+  --title <text>        Title (required)
+  --cmd "<string>"      Inline shell command (supports &&, |, ||, etc.)
+  --cmd-file <path>     Read command from file
+  --position <preset>   Pane position preset (default: floating)
+                        Floating: floating, floating:center, floating:top-left, floating:top-right,
+                                  floating:bottom-left, floating:bottom-right
+                        Split (Zellij): split, split:right, split:down
+                        Tab: tab
+
+Live Data Options:
+  --watch-cmd "<cmd>"   Shell command to run periodically for live data
+  --interval <ms>       Refresh interval in milliseconds (default: 1000)
+  --parse <mode>        Output parsing: number | json | lines | raw | auto (default: auto)
+
+  -h, --help            Show this help
+
+Examples:
+  termos run --title "Lines" gauge --watch-cmd "wc -l *.ts | awk '{print \\$1}'" --max 10000
+  termos run --title "Procs" gauge --watch-cmd "ps aux | wc -l" --interval 2000
 `);
+
+  const instructions = loadMergedInstructions(process.cwd());
+  if (instructions) {
+    console.log("\n## Project Instructions\n");
+    console.log(instructions);
+  }
 }
 
 function parseSessionArg(args: string[]): { sessionName?: string; rest: string[] } {
@@ -79,10 +100,8 @@ async function handleUp(args: string[]): Promise<void> {
   const eventsFile = ensureEventsFile(host.sessionName);
 
   console.log("Termos up is running.");
-  console.log("Streaming events for this session.");
   console.log(`Session: ${host.sessionName}`);
-  console.log("");
-  console.log(generateFullHelp());
+  console.log("Streaming events...\n");
 
   let buffer = "";
   let offset = 0;
@@ -141,13 +160,19 @@ async function handleRun(args: string[]): Promise<void> {
   }
 
   const { sessionName, rest } = parseSessionArg(args);
-  let width: string | undefined;
-  let height: string | undefined;
-  let x: string | undefined;
-  let y: string | undefined;
+  let title: string | undefined;
+  let position: PositionPreset | undefined;
   const hasWait = rest.includes("--wait");
   const hasNoWait = rest.includes("--no-wait");
-  const restArgs = rest.filter(arg => arg !== "--wait" && arg !== "--no-wait");
+  const restArgs = rest.filter(
+    arg => arg !== "--wait" && arg !== "--no-wait"
+  );
+
+  let cmdValue: string | undefined;
+  let cmdFileValue: string | undefined;
+  let watchCmdValue: string | undefined;
+  let intervalValue: number | undefined;
+  let parseValue: ParseMode | undefined;
   const builtinComponents: Record<string, string> = {
     "markdown": "markdown.tsx",
     "markdown.tsx": "markdown.tsx",
@@ -167,32 +192,61 @@ async function handleRun(args: string[]): Promise<void> {
     "progress.tsx": "progress.tsx",
     "mermaid": "mermaid.tsx",
     "mermaid.tsx": "mermaid.tsx",
+    "chart": "chart.tsx",
+    "chart.tsx": "chart.tsx",
+    "select": "select.tsx",
+    "select.tsx": "select.tsx",
+    "tree": "tree.tsx",
+    "tree.tsx": "tree.tsx",
+    "json": "json.tsx",
+    "json.tsx": "json.tsx",
+    "gauge": "gauge.tsx",
+    "gauge.tsx": "gauge.tsx",
   };
   for (let i = 0; i < restArgs.length; i++) {
     const arg = restArgs[i];
-    if (arg === "--width" && restArgs[i + 1]) {
-      width = restArgs[i + 1];
+    if (arg === "--") break;
+    if (arg === "--title" && restArgs[i + 1]) {
+      title = restArgs[i + 1];
       restArgs.splice(i, 2); i--;
-    } else if (arg.startsWith("--width=")) {
-      width = arg.slice(8);
+    } else if (arg.startsWith("--title=")) {
+      title = arg.slice(8);
       restArgs.splice(i, 1); i--;
-    } else if (arg === "--height" && restArgs[i + 1]) {
-      height = restArgs[i + 1];
+    } else if (arg === "--position" && restArgs[i + 1]) {
+      position = restArgs[i + 1] as PositionPreset;
       restArgs.splice(i, 2); i--;
-    } else if (arg.startsWith("--height=")) {
-      height = arg.slice(9);
+    } else if (arg.startsWith("--position=")) {
+      position = arg.slice("--position=".length) as PositionPreset;
       restArgs.splice(i, 1); i--;
-    } else if (arg === "--x" && restArgs[i + 1]) {
-      x = restArgs[i + 1];
+    } else if (arg === "--cmd" && restArgs[i + 1]) {
+      cmdValue = restArgs[i + 1];
       restArgs.splice(i, 2); i--;
-    } else if (arg.startsWith("--x=")) {
-      x = arg.slice(4);
+    } else if (arg.startsWith("--cmd=")) {
+      cmdValue = arg.slice("--cmd=".length);
       restArgs.splice(i, 1); i--;
-    } else if (arg === "--y" && restArgs[i + 1]) {
-      y = restArgs[i + 1];
+    } else if (arg === "--cmd-file" && restArgs[i + 1]) {
+      cmdFileValue = restArgs[i + 1];
       restArgs.splice(i, 2); i--;
-    } else if (arg.startsWith("--y=")) {
-      y = arg.slice(4);
+    } else if (arg.startsWith("--cmd-file=")) {
+      cmdFileValue = arg.slice("--cmd-file=".length);
+      restArgs.splice(i, 1); i--;
+    } else if (arg === "--watch-cmd" && restArgs[i + 1]) {
+      watchCmdValue = restArgs[i + 1];
+      restArgs.splice(i, 2); i--;
+    } else if (arg.startsWith("--watch-cmd=")) {
+      watchCmdValue = arg.slice("--watch-cmd=".length);
+      restArgs.splice(i, 1); i--;
+    } else if (arg === "--interval" && restArgs[i + 1]) {
+      intervalValue = parseInt(restArgs[i + 1], 10);
+      restArgs.splice(i, 2); i--;
+    } else if (arg.startsWith("--interval=")) {
+      intervalValue = parseInt(arg.slice("--interval=".length), 10);
+      restArgs.splice(i, 1); i--;
+    } else if (arg === "--parse" && restArgs[i + 1]) {
+      parseValue = restArgs[i + 1] as ParseMode;
+      restArgs.splice(i, 2); i--;
+    } else if (arg.startsWith("--parse=")) {
+      parseValue = arg.slice("--parse=".length) as ParseMode;
       restArgs.splice(i, 1); i--;
     }
   }
@@ -203,44 +257,61 @@ async function handleRun(args: string[]): Promise<void> {
     console.log(JSON.stringify({ action: "cancel", error: message }));
   };
 
-  const parsePercentNumber = (value: string | undefined, name: string): number | undefined => {
-    if (value === undefined) return undefined;
-    const trimmed = value.trim();
-    const numeric = trimmed.endsWith("%") ? trimmed.slice(0, -1) : trimmed;
-    const num = Number(numeric);
-    if (!Number.isFinite(num) || num < 0 || num > 100) {
-      emitRunError(`Invalid ${name} "${value}". Use a number between 0 and 100.`);
+  // Validate position preset
+  if (position && !VALID_POSITIONS.includes(position)) {
+    emitRunError(`Invalid position "${position}". Valid options: ${VALID_POSITIONS.join(", ")}`);
+    process.exit(1);
+  }
+
+  // Validate --cmd, --cmd-file, and -- separator are mutually exclusive
+  const cmdSources = [
+    cmdValue !== undefined,
+    cmdFileValue !== undefined,
+    sepIdx !== -1
+  ].filter(Boolean).length;
+
+  if (cmdSources > 1) {
+    emitRunError("Use only one of --cmd, --cmd-file, or '--' separator.");
+    process.exit(1);
+  }
+
+  // Validate --cmd-file exists and is readable
+  if (cmdFileValue) {
+    try {
+      if (!fs.existsSync(cmdFileValue)) {
+        emitRunError(`Command file not found: ${cmdFileValue}`);
+        process.exit(1);
+      }
+      const stats = fs.statSync(cmdFileValue);
+      if (!stats.isFile()) {
+        emitRunError(`Not a file: ${cmdFileValue}`);
+        process.exit(1);
+      }
+    } catch (err) {
+      emitRunError(`Error accessing command file: ${err instanceof Error ? err.message : String(err)}`);
       process.exit(1);
     }
-    return num;
-  };
+  }
 
-  const parsePercent = (value: string | undefined, name: string): string | undefined => {
-    const num = parsePercentNumber(value, name);
-    return num === undefined ? undefined : `${num}%`;
-  };
+  const titleValue = title?.trim();
+  if (!titleValue) {
+    const commandArgs = sepIdx !== -1 ? restArgs.slice(sepIdx + 1) : [];
+    const hasTitleAfterSeparator = commandArgs.some(arg => arg === "--title" || arg.startsWith("--title="));
+    if (hasTitleAfterSeparator) {
+      emitRunError("--title is required and must appear before '--' (command separator).");
+    } else {
+      emitRunError("--title is required.");
+    }
+    process.exit(1);
+  }
 
   const component = restArgs[0]?.toLowerCase();
-  const isBuiltinComponent = sepIdx === -1 && (component === "ask" || !!builtinComponents[component ?? ""]);
-  if (isBuiltinComponent) {
-    if (width === undefined) width = DEFAULT_GEOMETRY.width;
-    if (height === undefined) height = DEFAULT_GEOMETRY.height;
-    if (x === undefined) x = DEFAULT_GEOMETRY.x;
-    if (y === undefined) y = DEFAULT_GEOMETRY.y;
-  }
+  const isCommandMode = cmdValue !== undefined || cmdFileValue !== undefined || sepIdx !== -1;
 
   const host = selectPaneHost(process.cwd(), sessionName);
-  const paneWidth = parsePercent(width, "width");
-  const paneHeight = parsePercent(height, "height");
-  const paneX = parsePercent(x, "x");
-  const paneY = parsePercent(y, "y");
 
-  if (host.supportsGeometry) {
-    if (paneWidth === undefined || paneHeight === undefined || paneX === undefined || paneY === undefined) {
-      emitRunError("Pane geometry required for custom components and commands: --width --height --x --y (0-100).");
-      process.exit(1);
-    }
-  }
+  // Default position: tab for commands, floating for components
+  const effectivePosition: PositionPreset = position ?? (isCommandMode ? "tab" : "floating");
 
   let inkFile: string | undefined;
   let inkArgs: Record<string, string> | undefined;
@@ -417,12 +488,9 @@ async function handleRun(args: string[]): Promise<void> {
     const im = new InteractionManager({ cwd: process.cwd(), host });
     const id = await im.create({
       schema,
-      title: cmdArgs["title"],
+      title: titleValue,
       timeoutMs: wait ? 300000 : 0,
-      width: paneWidth,
-      height: paneHeight,
-      x: paneX,
-      y: paneY,
+      position: effectivePosition,
       component: "ask",
     });
 
@@ -437,7 +505,11 @@ async function handleRun(args: string[]): Promise<void> {
     process.exit(0);
   }
 
-  if (sepIdx !== -1) {
+  if (cmdValue) {
+    command = cmdValue;
+  } else if (cmdFileValue) {
+    command = fs.readFileSync(cmdFileValue, "utf8").trim();
+  } else if (sepIdx !== -1) {
     command = restArgs.slice(sepIdx + 1).join(" ");
     if (!command) { console.error("Usage: termos run -- <command>"); process.exit(1); }
   } else {
@@ -488,26 +560,83 @@ async function handleRun(args: string[]): Promise<void> {
         inkArgs[positionalKey] = arg;
       }
     }
+    if (titleValue && !("title" in inkArgs)) {
+      inkArgs["title"] = titleValue;
+    }
     if (!Object.keys(inkArgs).length) inkArgs = undefined;
+  }
+
+  // Handle --watch-cmd: set up command watcher with temp file
+  let watcherCleanup: (() => void) | undefined;
+  let tempFile: string | undefined;
+
+  if (watchCmdValue) {
+    tempFile = path.join(os.tmpdir(), `termos-watch-${Date.now()}.json`);
+
+    // Initialize with empty data
+    fs.writeFileSync(tempFile, JSON.stringify({ value: 0 }));
+
+    // Ensure inkArgs exists
+    if (!inkArgs) inkArgs = {};
+
+    // Override file arg to use temp file
+    inkArgs["file"] = tempFile;
+
+    // Start the watcher
+    watcherCleanup = startCommandWatcher({
+      cmd: watchCmdValue,
+      interval: intervalValue || 1000,
+      parse: parseValue || "auto",
+      outputFile: tempFile,
+      componentType: component,
+      componentArgs: inkArgs,
+      onError: (err) => {
+        console.error(`Watch command error: ${err.message}`);
+      },
+    });
+
+    // Clean up on exit
+    const cleanup = () => {
+      if (watcherCleanup) watcherCleanup();
+      if (tempFile) {
+        try { fs.unlinkSync(tempFile); } catch { /* ignore */ }
+      }
+    };
+
+    process.on("exit", cleanup);
+    process.on("SIGINT", () => { cleanup(); process.exit(0); });
+    process.on("SIGTERM", () => { cleanup(); process.exit(0); });
   }
 
   ensureEventsFile(host.sessionName);
   const im = new InteractionManager({ cwd: process.cwd(), host });
-  const componentName = sepIdx !== -1 ? undefined : component;
+  const componentName = isCommandMode ? undefined : component;
+
+  // Calculate component height based on data
+  let heightPercent: number | undefined;
+  if (!isCommandMode && component) {
+    const termRows = process.stdout.rows || 40;
+    const idealRows = getComponentHeight(component, (inkArgs ?? {}) as Record<string, string>);
+    heightPercent = rowsToPercent(idealRows, termRows);
+  }
+
   const id = await im.create({
     inkFile,
     inkArgs,
     command,
+    title: titleValue,
     timeoutMs: wait ? 300000 : 0,
-    width: paneWidth,
-    height: paneHeight,
-    x: paneX,
-    y: paneY,
+    position: effectivePosition,
     component: componentName,
-    isCommand: sepIdx !== -1,
+    isCommand: isCommandMode,
+    heightPercent,
   });
 
-  if (wait) {
+  // When using --watch-cmd, we must wait for the component to finish
+  // so we can keep updating the temp file
+  const shouldWait = wait || !!watchCmdValue;
+
+  if (shouldWait) {
     const result = await new Promise<InteractionResult>(resolve => {
       im.on("interactionComplete", (iid: string, r: InteractionResult) => { if (iid === id) resolve(r); });
     });

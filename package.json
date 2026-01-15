@@ -17,7 +17,9 @@
   "scripts": {
     "build": "tsc && npm run bundle:ink-runner",
     "bundle:ink-runner": "node scripts/bundle-ink-runner.mjs",
-    "dev": "tsc --watch",
+    "dev": "npm run serve",
+    "dev:cli": "tsc --watch",
+    "serve": "python -m http.server 8005 --directory docs",
     "start": "node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest",

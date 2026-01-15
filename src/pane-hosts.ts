@@ -4,18 +4,50 @@ import * as path from "path";
 import * as os from "os";
 import * as fs from "fs";
 import { normalizeSessionName } from "./runtime.js";
-import { runFloatingPane } from "./zellij.js";
+import { runFloatingPane, runTab, runSplitPane, getOptimalSplitDirection } from "./zellij.js";
 
 const execFileAsync = promisify(execFile);
+
+export type PositionPreset =
+  | "floating"
+  | "floating:center"
+  | "floating:top-left"
+  | "floating:top-right"
+  | "floating:bottom-left"
+  | "floating:bottom-right"
+  | "split"
+  | "split:right"
+  | "split:down"
+  | "tab";
+
+export const VALID_POSITIONS: PositionPreset[] = [
+  "floating",
+  "floating:center",
+  "floating:top-left",
+  "floating:top-right",
+  "floating:bottom-left",
+  "floating:bottom-right",
+  "split",
+  "split:right",
+  "split:down",
+  "tab",
+];
+
+export const FLOATING_PRESETS: Record<string, { x: string; y: string; width: string; height: string }> = {
+  "floating":              { x: "60", y: "5",  width: "40", height: "50" },
+  "floating:center":       { x: "30", y: "25", width: "40", height: "50" },
+  "floating:top-left":     { x: "0",  y: "5",  width: "40", height: "50" },
+  "floating:top-right":    { x: "60", y: "5",  width: "40", height: "50" },
+  "floating:bottom-left":  { x: "0",  y: "45", width: "40", height: "50" },
+  "floating:bottom-right": { x: "60", y: "45", width: "40", height: "50" },
+};
 
 export interface PaneRunOptions {
   name?: string;
   cwd?: string;
-  width?: string;
-  height?: string;
-  x?: string;
-  y?: string;
+  position?: PositionPreset;
   closeOnExit?: boolean;
+  heightPercent?: number;  // Override height (percentage of terminal)
 }
 
 export interface PaneHost {
@@ -94,17 +126,64 @@ function createZellijHost(sessionName: string): PaneHost {
     sessionName,
     supportsGeometry: true,
     async run(command, options, env) {
-      await runFloatingPane(command, options, env);
+      const position = options.position ?? "floating";
+
+      if (position === "tab") {
+        await runTab(command, { name: options.name, cwd: options.cwd }, env);
+      } else if (position.startsWith("split")) {
+        let direction: "right" | "down" | undefined;
+        if (position === "split:right") direction = "right";
+        else if (position === "split:down") direction = "down";
+        // else "split" uses auto-detection
+        await runSplitPane(command, {
+          name: options.name,
+          cwd: options.cwd,
+          closeOnExit: options.closeOnExit,
+          direction: direction ?? getOptimalSplitDirection(),
+        }, env);
+      } else {
+        // floating presets
+        const geometry = FLOATING_PRESETS[position] ?? FLOATING_PRESETS["floating"];
+        const effectiveHeight = options.heightPercent
+          ? String(options.heightPercent)
+          : geometry.height;
+        await runFloatingPane(command, {
+          name: options.name,
+          cwd: options.cwd,
+          closeOnExit: options.closeOnExit,
+          ...geometry,
+          height: effectiveHeight,
+        }, env);
+      }
     },
   };
 }
 
 function createGhosttyHost(sessionName: string): PaneHost {
+  const ghosttyExe = findExecutable("ghostty");
   const ghosttyApp = resolveGhosttyApp() ?? "Ghostty.app";
   return {
     kind: "ghostty",
     sessionName,
     supportsGeometry: false,
+    async close(name?: string) {
+      if (!name) return;
+      // Close Ghostty window by title using AppleScript
+      const script = `
+tell application "Ghostty"
+  repeat with w in windows
+    if name of w contains "termos:${name}" then
+      close w
+      exit repeat
+    end if
+  end repeat
+end tell`;
+      try {
+        await execFileAsync("osascript", ["-e", script]);
+      } catch {
+        // Ignore errors if window not found or already closed
+      }
+    },
     async run(command, options, env) {
       const cwd = options.cwd ?? process.cwd();
       const name = options.name ?? "termos";
@@ -112,12 +191,26 @@ function createGhosttyHost(sessionName: string): PaneHost {
       const titleCommand = `printf '\\033]0;termos:${name}\\007'`;
       const closeNote = options.closeOnExit
         ? `; printf '\\n[termos] Pane closed. Please close this tab/window.\\n'`
-        : "";
+        : `; printf '\\n[termos] Press Enter to close...\\n'; read _`;
       const shellCommand = buildShellCommand(
         `cd ${shellEscape(cwd)}; ${clearCommand}; ${titleCommand}; ${command}${closeNote}`,
         env
       );
-      await execFileAsync("open", ["-na", ghosttyApp, "--args", "-e", "sh", "-lc", shellCommand]);
+      // Write to temp file with shebang and execute it using user's shell
+      const tmpFile = `/tmp/termos-${Date.now()}.sh`;
+      const userShell = process.env.SHELL || "/bin/sh";
+      const scriptContent = `#!${userShell}
+${shellCommand}
+`;
+      fs.writeFileSync(tmpFile, scriptContent, "utf8");
+      fs.chmodSync(tmpFile, 0o755);
+      if (ghosttyExe) {
+        await execFileAsync(ghosttyExe, ["-e", tmpFile]);
+      } else {
+        await execFileAsync("open", ["-na", ghosttyApp, "--args", "-e", tmpFile]);
+      }
+      // Clean up after delay
+      setTimeout(() => { try { fs.unlinkSync(tmpFile); } catch {} }, 2000);
     },
   };
 }
@@ -127,6 +220,26 @@ function createMacTerminalHost(sessionName: string): PaneHost {
     kind: "mac-terminal",
     sessionName,
     supportsGeometry: false,
+    async close(name?: string) {
+      if (!name) return;
+      // Close Terminal tab by custom title using AppleScript
+      const script = `
+tell application "Terminal"
+  repeat with w in windows
+    repeat with t in tabs of w
+      if custom title of t contains "termos:${name}" then
+        close t
+        return
+      end if
+    end repeat
+  end repeat
+end tell`;
+      try {
+        await execFileAsync("osascript", ["-e", script]);
+      } catch {
+        // Ignore errors if tab not found or already closed
+      }
+    },
     async run(command, options, env) {
       const cwd = options.cwd ?? process.cwd();
       const name = options.name ?? "termos";
@@ -134,7 +247,7 @@ function createMacTerminalHost(sessionName: string): PaneHost {
       const titleCommand = `printf '\\033]0;termos:${name}\\007'`;
       const closeNote = options.closeOnExit
         ? `; printf '\\n[termos] Pane closed. Please close this tab/window.\\n'`
-        : "";
+        : `; printf '\\n[termos] Press Enter to close...\\n'; read _`;
       const shellCommand = buildShellCommand(
         `cd ${shellEscape(cwd)}; ${clearCommand}; ${titleCommand}; ${command}${closeNote}`,
         env
@@ -158,9 +271,7 @@ function createMacTerminalHost(sessionName: string): PaneHost {
 
 export function selectPaneHost(cwd: string, sessionNameOverride?: string): PaneHost {
   const resolved = resolveSessionName(cwd, sessionNameOverride);
-  if (!resolved.inZellij && !resolved.explicit) {
-    throw new Error("Not in Zellij. Provide --session <name> or set TERMOS_SESSION_NAME.");
-  }
+
   if (resolved.inZellij) {
     return createZellijHost(resolved.name);
   }
@@ -170,6 +281,11 @@ export function selectPaneHost(cwd: string, sessionNameOverride?: string): PaneH
       return createGhosttyHost(resolved.name);
     }
     return createMacTerminalHost(resolved.name);
+  }
+
+  // Linux/Windows require Zellij or explicit session name
+  if (!resolved.explicit) {
+    throw new Error("termos must be run inside a Zellij session on this platform. Provide --session <name> or set TERMOS_SESSION_NAME.");
   }
 
   throw new Error("termos must be run inside a Zellij session on this platform.");

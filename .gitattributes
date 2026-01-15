@@ -1,0 +1,2 @@
+# Asciinema recordings are JSON-based text files
+*.cast text diff

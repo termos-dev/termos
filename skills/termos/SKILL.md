@@ -1,6 +1,6 @@
 ---
 name: termos
-description: Run Termos interactive UI inside Zellij for Codex sessions. Use when the user asks for interactive questions, confirmations, checklists, tables, code/diff/markdown/mermaid views, or any Termos UI. Requires `termos up` running; geometry defaults apply to built-ins.
+description: Run Termos interactive UI inside Zellij for Codex sessions. Use when the user asks for interactive questions, confirmations, checklists, tables, code/diff/markdown/mermaid views, or any Termos UI. Requires `termos up` running.
 ---
 
 # Termos
@@ -13,32 +13,63 @@ termos up
 ```
 Keep `termos up` running to receive interaction results.
 
-On macOS without Zellij, Termos will open Ghostty if available, otherwise a Terminal tab for each interaction. Geometry is ignored.
+On macOS without Zellij, Termos will open Ghostty if available, otherwise a Terminal tab for each interaction.
 If `termos up` and `termos run` are in different directories, set a shared session name (required outside Zellij):
 ```bash
 termos up --session demo
-termos run --session demo confirm --prompt "Proceed?"
+termos run --session demo --title "Confirm" confirm --prompt "Proceed?"
 ```
 You can also set `TERMOS_SESSION_NAME` for both commands.
 
-## Geometry (defaults for built-ins)
+`--title` is required for all `termos run` invocations.
 
-Built-in components can omit geometry and default to top-right:
-`--width 40 --height 50 --x 60 --y 5`.
-Custom components and `termos run -- <command>` require geometry (0–100).
+## Background processes (Codex/Claude skills only)
 
-Example with explicit geometry:
+- Do not use Codex/Claude background-process tools.
+- Do not use shell backgrounding (`&`) for long-running tasks.
+- All background/long-running processes must be started with `termos run -- <command>` so they live in their own Zellij tab/pane.
+
+Example:
 ```bash
-termos run --width 40 --height 50 --x 60 --y 5 confirm --prompt "Proceed?"
+termos run --title "HTTP Server" -- python3 -m http.server 8080
 ```
-Use different x/y values to avoid stacked panes.
-Think of geometry as percent-of-screen:
-- `width/height` = size, `x/y` = top-left offset
-- Avoid bottom-left (keep it free for typing).
-- Example placements that don't overlap:
-  - Top-right: `--width 40 --height 45 --x 60 --y 5`
-  - Bottom-right: `--width 40 --height 45 --x 60 --y 55`
-  - Top-left: `--width 40 --height 45 --x 0 --y 5`
+
+## Position Presets
+
+Use `--position <preset>` to control where interactions appear:
+
+**Floating (overlay panes):**
+- `floating` - Top-right (default for components)
+- `floating:center` - Centered
+- `floating:top-left` - Top-left corner
+- `floating:top-right` - Top-right corner
+- `floating:bottom-left` - Bottom-left corner
+- `floating:bottom-right` - Bottom-right corner
+
+**Split (Zellij only - integrated into layout):**
+- `split` - Auto-detect direction based on terminal size
+- `split:right` - Side-by-side split
+- `split:down` - Stacked split
+
+**Tab:**
+- `tab` - New tab (default for commands)
+
+Examples:
+```bash
+# Floating (default for components)
+termos run --title "Confirm" confirm --prompt "Proceed?"
+
+# Centered floating pane
+termos run --title "Question" --position floating:center ask --prompt "Name?"
+
+# Split pane (Zellij only)
+termos run --title "Review" --position split confirm --prompt "Approve changes?"
+
+# Tab (default for commands)
+termos run --title "Server" -- python3 -m http.server 8080
+```
+
+Note: Split positions only work in Zellij. On macOS without Zellij, split falls back to a new window.
 
 ## Use `termos run` (async)
 
@@ -48,17 +79,17 @@ Think of geometry as percent-of-screen:
 
 Single question:
 ```bash
-termos run ask --prompt "What is your name?" --placeholder "Enter your name..."
+termos run --title "Question" ask --prompt "What is your name?" --placeholder "Enter your name..."
 ```
 
 Single question with choices:
 ```bash
-termos run ask --prompt "Favorite language?" --options "TypeScript,Python,Go"
+termos run --title "Question" ask --prompt "Favorite language?" --options "TypeScript,Python,Go"
 ```
 
 Multiple questions (inline JSON array):
 ```bash
-termos run ask --questions '[{"question":"Name?","options":["Alice","Bob"]}]'
+termos run --title "Question" ask --questions '[{"question":"Name?","options":["Alice","Bob"]}]'
 ```
 
 ## Docs for LLMs

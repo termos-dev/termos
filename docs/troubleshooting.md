@@ -9,11 +9,19 @@
 
 ## Session confusion ("termos up shows nothing")
 
-Outside Zellij, you must use a shared session name:
+On macOS, the session name is auto-generated from the directory name, so `--session` is optional:
+
+```bash
+# On macOS: session auto-generated from directory name
+termos up
+termos run --title "Confirm" confirm --prompt "Proceed?"
+```
+
+On Linux/Windows outside Zellij, you must use a shared session name:
 
 ```bash
 termos up --session demo
-termos run --session demo confirm --prompt "Proceed?"
+termos run --session demo --title "Confirm" confirm --prompt "Proceed?"
 ```
 
 Or set `TERMOS_SESSION_NAME` for both commands.
@@ -37,7 +45,22 @@ zellij run --floating -- $SHELL -lc 'echo node=$(command -v node); node -v; read
 If `node` is missing, force the Node binary used by Termos:
 
 ```bash
-TERMOS_NODE="$(command -v node)" termos run --wait confirm --prompt "Ping?"
+TERMOS_NODE="$(command -v node)" termos run --wait --title "Confirm" confirm --prompt "Ping?"
+```
+
+## Commands in Zellij (tab vs floating vs split)
+
+`termos run -- <command>` opens a new Zellij tab by default. Use `--position` to control placement:
+
+```bash
+# Tab (default for commands)
+termos run --title "HTTP Server" -- python3 -m http.server 8000
+
+# Floating pane
+termos run --title "HTTP Server" --position floating -- python3 -m http.server 8000
+
+# Split pane (integrated into layout)
+termos run --title "HTTP Server" --position split -- python3 -m http.server 8000
 ```
 
 ## `--wait` hangs
@@ -75,4 +98,4 @@ The repo ships a wrapper at `.claude-plugin/scripts/termos` that uses `dist/inde
 ## macOS Ghostty notes
 
 - Ghostty is used if installed; otherwise a Terminal tab is opened.
-- Geometry flags are ignored outside Zellij.
+- Split positions (`--position split`) fall back to a new window outside Zellij.

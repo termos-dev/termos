@@ -266,15 +266,6 @@ const __dirname = __dirname_fn(__filename);
       process.exit(1);
     }
 
-    // Show title if provided (box border style)
-    if (displayTitle) {
-      const cols = process.stdout.columns || 80;
-      const titleLen = displayTitle.length;
-      const padding = cols - titleLen - 4; // 4 = "╭─ " + " ╮"
-      const line = "─".repeat(Math.max(0, padding));
-      console.log(`\x1b[36m╭─ ${displayTitle} ${line}╮\x1b[0m`);
-    }
-
     // Build node arguments with optional sandbox permissions
     const nodeArgs: string[] = [];
 

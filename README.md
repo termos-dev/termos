@@ -10,12 +10,12 @@ npm install -g @termosdev/cli
 
 ## Claude Install
 
-- Marketplace: install the Termos plugin from Claude’s plugin marketplace (if published).
+- Marketplace: install the Termos plugin from Claude's plugin marketplace (if published).
 - Local dev: run Claude with `--plugin-dir .claude-plugin` from this repo.
 
 ## Codex Skill Install
 
-Use Codex’s skill tools:
+Use Codex's skill tools:
 
 - Repo‑scoped (no install): put the skill in `.codex/skills/termos` inside your repo.
   ```bash
@@ -36,8 +36,6 @@ Restart Codex after installing.
 
 - Zellij is required on Linux/Windows. On macOS, Termos can run outside Zellij and will open
   Ghostty if available; otherwise it opens macOS Terminal tabs for interactions.
-- Pane geometry is required for custom components and commands when using Zellij. Built-ins default to
-  width 40, height 50, x 60, y 5 (top-right) when omitted. Geometry is ignored in macOS Terminal mode.
 
 ## Quick Start
 
@@ -58,36 +56,72 @@ termos up
 3. Run an interaction (in another pane/tab):
 
 ```bash
-termos run confirm --prompt "Proceed?"
+termos run --title "Confirm" confirm --prompt "Proceed?"
 ```
-
-Defaults for built-ins: `--width 40 --height 50 --x 60 --y 5`.
 
 macOS mode (no Zellij):
 
 ```bash
 termos up
-termos run confirm --prompt "Proceed?"
+termos run --title "Confirm" confirm --prompt "Proceed?"
 ```
 
 If you run `termos up` and `termos run` from different directories, set a shared session name:
 
 ```bash
+# Linux/Windows or cross-directory usage:
 TERMOS_SESSION_NAME=my-session termos up
-TERMOS_SESSION_NAME=my-session termos run confirm --prompt "Proceed?"
+TERMOS_SESSION_NAME=my-session termos run --title "Confirm" confirm --prompt "Proceed?"
 ```
+
+Note: On macOS, the session name is automatically generated from the directory name, so `--session` is only needed when running from different directories.
 
 ## CLI Commands
 
 ```bash
 termos up                   # Stream events for current session (long-running)
 termos run <component>       # Run a built-in or custom Ink component
-termos run -- <command>      # Run a shell command in a floating pane
+termos run -- <command>      # Run a shell command (tab by default)
 ```
 
 Built-in components: `ask`, `confirm`, `checklist`, `code`, `diff`, `table`, `progress`, `mermaid`, `markdown`, `plan-viewer`.
 
 Run `termos run --help` for detailed schemas and options.
+
+## Position Presets
+
+Use `--position <preset>` to control where interactions appear:
+
+**Floating (overlay panes):**
+- `floating` - Top-right (default for components)
+- `floating:center` - Centered overlay
+- `floating:top-left`, `floating:top-right`
+- `floating:bottom-left`, `floating:bottom-right`
+
+**Split (Zellij only - integrated into layout):**
+- `split` - Auto-detect direction based on terminal size
+- `split:right` - Side-by-side split
+- `split:down` - Stacked split
+
+**Tab:**
+- `tab` - New tab (default for commands)
+
+Examples:
+```bash
+# Floating (default for components)
+termos run --title "Confirm" confirm --prompt "Proceed?"
+
+# Centered floating pane
+termos run --title "Question" --position floating:center ask --prompt "Name?"
+
+# Split pane (Zellij only)
+termos run --title "Review" --position split confirm --prompt "Approve changes?"
+
+# Tab (default for commands)
+termos run --title "Server" -- python3 -m http.server 8080
+```
+
+Note: Split positions only work in Zellij. On macOS without Zellij, split falls back to a new window.
 
 ## Interactive Forms
 
