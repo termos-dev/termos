@@ -122,7 +122,7 @@ export class InteractionManager extends EventEmitter {
    * 1. Absolute paths used as-is
    * 2. Project .termos/interactive/ (user override)
    * 3. Global ~/.termos/interactive/ (user global)
-   * 4. Package templates/interactive/ (bundled defaults)
+   * 4. ink-runner bundled components
    */
   resolveInkFile(filePath: string): string {
     // Absolute paths used as-is
@@ -154,13 +154,6 @@ export class InteractionManager extends EventEmitter {
     const globalPath = path.join(os.homedir(), ".termos", "interactive", normalizedPath);
     if (fs.existsSync(globalPath)) {
       return globalPath;
-    }
-
-    // Try bundled templates from package
-    const packageRoot = path.dirname(path.dirname(import.meta.url.replace("file://", "")));
-    const templatePath = path.join(packageRoot, "templates", "interactive", normalizedPath);
-    if (fs.existsSync(templatePath)) {
-      return templatePath;
     }
 
     // Try ink-runner bundled components (dist/ink-runner/components/)
