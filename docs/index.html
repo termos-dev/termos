@@ -254,24 +254,28 @@ claude plugins install termos</code></pre>
         "bg-white/15 text-white border-cyan-200/60 shadow-[0_0_25px_rgba(56,189,248,0.25)] font-semibold";
       const inactiveTabClass = "bg-white/5 text-slate-300 font-medium";
 
-      // Initialize asciinema players
+      // Lazy-load asciinema players when tab is first shown
       const asciinemaPlayers = {};
-      if (window.AsciinemaPlayer) {
-        asciinemaPlayers.without = AsciinemaPlayer.create(
-          "recordings/without-termos.cast",
-          asciinemaWithout,
-          { fit: "width", autoPlay: true, loop: true, speed: 1 }
-        );
-        asciinemaPlayers.terminal = AsciinemaPlayer.create(
-          "recordings/termos-terminal.cast",
-          asciinemaTerminal,
-          { fit: "width", autoPlay: true, loop: true, speed: 1 }
-        );
-      }
+      const playerConfigs = {
+        without: { src: "recordings/without-termos.cast", el: asciinemaWithout },
+        terminal: { src: "recordings/termos-terminal.cast", el: asciinemaTerminal },
+      };
+
+      const getOrCreatePlayer = (key) => {
+        if (!asciinemaPlayers[key] && window.AsciinemaPlayer && playerConfigs[key]) {
+          const config = playerConfigs[key];
+          asciinemaPlayers[key] = AsciinemaPlayer.create(
+            config.src,
+            config.el,
+            { fit: "width", autoPlay: true, loop: true, speed: 1 }
+          );
+        }
+        return asciinemaPlayers[key];
+      };
 
       const mediaMap = {
-        without: { type: "asciinema", el: asciinemaWithout, player: asciinemaPlayers.without },
-        terminal: { type: "asciinema", el: asciinemaTerminal, player: asciinemaPlayers.terminal },
+        without: { type: "asciinema", el: asciinemaWithout },
+        terminal: { type: "asciinema", el: asciinemaTerminal },
         macos: { type: "video", el: video },
       };
 
@@ -296,15 +300,14 @@ claude plugins install termos</code></pre>
             if (entry.type === "video" && video) {
               video.currentTime = 0;
               video.play().catch(() => {});
-            } else if (entry.type === "asciinema" && entry.player) {
-              entry.player.play();
+            } else if (entry.type === "asciinema") {
+              // Lazy-create player when tab becomes visible
+              getOrCreatePlayer(name);
             }
           } else {
             entry.el.classList.add("hidden");
             if (entry.type === "video" && video) {
               video.pause();
-            } else if (entry.type === "asciinema" && entry.player) {
-              entry.player.pause();
             }
           }
         });
