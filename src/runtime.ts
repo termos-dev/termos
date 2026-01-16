@@ -49,12 +49,3 @@ export function touchHeartbeat(sessionName: string): void {
   const now = new Date();
   fs.utimesSync(p, now, now);
 }
-
-function isHeartbeatFresh(sessionName: string, maxAgeMs = 2000): boolean {
-  try {
-    const stat = fs.statSync(getHeartbeatPath(sessionName));
-    return Date.now() - stat.mtimeMs < maxAgeMs;
-  } catch {
-    return false;
-  }
-}

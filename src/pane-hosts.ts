@@ -5,7 +5,7 @@ import * as os from "os";
 import * as fs from "fs";
 import { normalizeSessionName } from "./runtime.js";
 import { runFloatingPane, runTab, runSplitPane, getOptimalSplitDirection } from "./zellij.js";
-import { shellEscape, buildShellCommand } from "./shell-utils.js";
+import { shellEscape, buildMacOSTerminalCommand } from "./shell-utils.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -167,17 +167,8 @@ end tell`;
       }
     },
     async run(command, options, env) {
-      const cwd = options.cwd ?? process.cwd();
       const name = options.name ?? "termos";
-      const clearCommand = `printf '\\033[3J\\033[H\\033[2J'`;
-      const titleCommand = `printf '\\033]0;termos:${name}\\007'`;
-      const closeNote = options.closeOnExit
-        ? `; printf '\\n[termos] Pane closed. Please close this tab/window.\\n'`
-        : `; printf '\\n[termos] Press Enter to close...\\n'; read _`;
-      const shellCommand = buildShellCommand(
-        `cd ${shellEscape(cwd)}; ${clearCommand}; ${titleCommand}; ${command}${closeNote}`,
-        env
-      );
+      const shellCommand = buildMacOSTerminalCommand(command, options, env);
       // Write to temp file with shebang and execute it using user's shell
       const tmpFile = `/tmp/termos-${Date.now()}.sh`;
       const userShell = process.env.SHELL || "/bin/sh";
@@ -223,17 +214,8 @@ end tell`;
       }
     },
     async run(command, options, env) {
-      const cwd = options.cwd ?? process.cwd();
       const name = options.name ?? "termos";
-      const clearCommand = `printf '\\033[3J\\033[H\\033[2J'`;
-      const titleCommand = `printf '\\033]0;termos:${name}\\007'`;
-      const closeNote = options.closeOnExit
-        ? `; printf '\\n[termos] Pane closed. Please close this tab/window.\\n'`
-        : `; printf '\\n[termos] Press Enter to close...\\n'; read _`;
-      const shellCommand = buildShellCommand(
-        `cd ${shellEscape(cwd)}; ${clearCommand}; ${titleCommand}; ${command}${closeNote}`,
-        env
-      );
+      const shellCommand = buildMacOSTerminalCommand(command, options, env);
       const scriptLines = [
         "tell application \"Terminal\"",
         "activate",

@@ -69,7 +69,6 @@ export async function runFromFile(
     : filePathOrOptions;
 
   const filePath = options.filePath;
-  const displayTitle = options.title;
   // Disable sandbox by default in Docker/Linux due to Node.js permission assertion bug
   const isLinux = process.platform === "linux";
   const sandbox: SandboxOptions = options.sandbox ?? { enabled: !isLinux };

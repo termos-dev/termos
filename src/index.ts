@@ -333,12 +333,8 @@ async function handleRun(args: string[]): Promise<void> {
       }
     }
 
-    const emitCliError = (message: string) => {
-      console.log(JSON.stringify({ action: "cancel", error: message }));
-    };
-
     if (cmdArgs["file"]) {
-      emitCliError("--file is not supported for ask. Use --questions '<json>'");
+      emitRunError("--file is not supported for ask. Use --questions '<json>'");
       process.exit(1);
     }
 
@@ -362,7 +358,7 @@ async function handleRun(args: string[]): Promise<void> {
             question.options = joined.split(",").map(s => s.trim()).filter(Boolean);
           }
         } catch {
-          emitCliError("Invalid JSON in --options/--choices");
+          emitRunError("Invalid JSON in --options/--choices");
           process.exit(1);
         }
       }
@@ -370,7 +366,7 @@ async function handleRun(args: string[]): Promise<void> {
     }
 
     if (!questionsArg) {
-      emitCliError("--questions or --prompt is required for ask component");
+      emitRunError("--questions or --prompt is required for ask component");
       process.exit(1);
     }
 
@@ -457,7 +453,7 @@ async function handleRun(args: string[]): Promise<void> {
       }
       schema = normalizeQuestions(shaped);
     } catch {
-      emitCliError("Invalid JSON in --questions");
+      emitRunError("Invalid JSON in --questions");
       process.exit(1);
     }
 
