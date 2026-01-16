@@ -2,9 +2,9 @@ import * as fs from "fs";
 import { getEventsFilePath } from "./runtime.js";
 
 /**
- * Event types for the MIDE events file
+ * Event types for the termos events file
  */
-export type TermosEventType = "result";
+type TermosEventType = "result";
 
 export interface TermosEventBase {
   ts: number;

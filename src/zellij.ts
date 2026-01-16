@@ -1,17 +1,10 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
+import { buildShellCommand } from "./shell-utils.js";
 
 const execFileAsync = promisify(execFile);
 
-export function requireZellijSession(): string {
-  const name = process.env.ZELLIJ_SESSION_NAME;
-  if (!name) {
-    throw new Error("termos must be run inside a Zellij session.");
-  }
-  return name;
-}
-
-export interface FloatingPaneOptions {
+interface FloatingPaneOptions {
   name?: string;
   width?: string;
   height?: string;
@@ -19,18 +12,6 @@ export interface FloatingPaneOptions {
   y?: string;
   closeOnExit?: boolean;
   cwd?: string;
-}
-
-function shellEscape(value: string): string {
-  return `'${value.replace(/'/g, "'\\''")}'`;
-}
-
-function buildShellCommand(command: string, env?: Record<string, string>): string {
-  if (!env || Object.keys(env).length === 0) {
-    return command;
-  }
-  const envParts = Object.entries(env).map(([key, value]) => `export ${key}=${shellEscape(value)};`);
-  return `${envParts.join(" ")} ${command}`;
 }
 
 export async function runFloatingPane(
@@ -79,19 +60,19 @@ export async function runTab(
   await execFileAsync("zellij", runArgs);
 }
 
-export interface SplitPaneOptions {
+interface SplitPaneOptions {
   name?: string;
   direction?: "right" | "down";
   closeOnExit?: boolean;
   cwd?: string;
 }
 
-export interface PaneDimensions {
+interface PaneDimensions {
   columns: number;
   rows: number;
 }
 
-export function getCurrentPaneDimensions(): PaneDimensions {
+function getCurrentPaneDimensions(): PaneDimensions {
   return {
     columns: process.stdout.columns || 80,
     rows: process.stdout.rows || 24,

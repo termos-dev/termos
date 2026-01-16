@@ -5,6 +5,7 @@ import * as os from "os";
 import * as fs from "fs";
 import { normalizeSessionName } from "./runtime.js";
 import { runFloatingPane, runTab, runSplitPane, getOptimalSplitDirection } from "./zellij.js";
+import { shellEscape, buildShellCommand } from "./shell-utils.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -33,7 +34,7 @@ export const VALID_POSITIONS: PositionPreset[] = [
   "tab",
 ];
 
-export const FLOATING_PRESETS: Record<string, { x: string; y: string; width: string; height: string }> = {
+const FLOATING_PRESETS: Record<string, { x: string; y: string; width: string; height: string }> = {
   "floating":              { x: "68%", y: "5%",  width: "30%", height: "40%" },
   "floating:center":       { x: "35%", y: "30%", width: "30%", height: "40%" },
   "floating:top-left":     { x: "2%",  y: "5%",  width: "30%", height: "40%" },
@@ -67,18 +68,6 @@ function resolveSessionName(cwd: string): { name: string; inZellij: boolean } {
   // Session name is always derived from cwd
   const base = path.basename(cwd || process.cwd()) || "session";
   return { name: normalizeSessionName(base), inZellij: false };
-}
-
-function shellEscape(value: string): string {
-  return `'${value.replace(/'/g, "'\\''")}'`;
-}
-
-function buildShellCommand(command: string, env?: Record<string, string>): string {
-  if (!env || Object.keys(env).length === 0) {
-    return command;
-  }
-  const envParts = Object.entries(env).map(([key, value]) => `export ${key}=${shellEscape(value)};`);
-  return `${envParts.join(" ")} ${command}`;
 }
 
 function escapeAppleScript(value: string): string {

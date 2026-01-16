@@ -7,7 +7,7 @@ import { fileURLToPath } from "url";
 import { InteractionManager, type InteractionResult } from "./interaction-manager.js";
 import { ensureEventsFile, ensureHeartbeat, touchHeartbeat } from "./runtime.js";
 import { selectPaneHost, VALID_POSITIONS, type PositionPreset } from "./pane-hosts.js";
-import { generateFullHelp, componentSchemas, globalOptionsSchema, type FormSchema } from "@termosdev/shared";
+import { generateFullHelp, componentSchemas, type FormSchema } from "@termosdev/shared";
 import { startCommandWatcher, type ParseMode } from "./command-watcher.js";
 import { getComponentHeight, rowsToPercent } from "./height-calculator.js";
 import { loadMergedInstructions } from "./instructions-loader.js";
@@ -226,7 +226,7 @@ async function handleRun(args: string[]): Promise<void> {
   }
 
   const sepIdx = restArgs.indexOf("--");
-  const wait = hasWait ? true : (hasNoWait ? false : false);
+  const wait = hasWait;
   const emitRunError = (message: string) => {
     console.log(JSON.stringify({ action: "cancel", error: message }));
   };

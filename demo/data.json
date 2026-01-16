@@ -1,6 +1,0 @@
-[
-  { "name": "Alice", "role": "Developer", "status": "Active", "tasks": 12 },
-  { "name": "Bob", "role": "Designer", "status": "Active", "tasks": 8 },
-  { "name": "Charlie", "role": "PM", "status": "Away", "tasks": 5 },
-  { "name": "Diana", "role": "QA", "status": "Active", "tasks": 15 }
-]

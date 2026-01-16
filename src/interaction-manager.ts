@@ -10,6 +10,7 @@ import {
 import { findResultEvent } from "./events.js";
 import { ensureEventsFile, getSessionRuntimeDir, getHeartbeatPath } from "./runtime.js";
 import { type PaneHost, selectPaneHost, type PositionPreset } from "./pane-hosts.js";
+import { shellEscape } from "./shell-utils.js";
 
 // ESM compatibility for __dirname
 const __filename = fileURLToPath(import.meta.url);
@@ -213,7 +214,6 @@ export class InteractionManager extends EventEmitter {
     if (fs.existsSync(heartbeatPath)) {
       env.TERMOS_HEARTBEAT_FILE = heartbeatPath;
     }
-    const shellEscape = (s: string) => s.replace(/'/g, "'\\''");
     const nodeBin = process.env.TERMOS_NODE || process.execPath || "node";
     const nodeCmd = shellEscape(nodeBin);
     const pidPrefix = 'if [ -n "$TERMOS_PID_FILE" ]; then echo $$ > "$TERMOS_PID_FILE"; fi';
