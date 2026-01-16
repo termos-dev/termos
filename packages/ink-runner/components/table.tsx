@@ -1,6 +1,7 @@
-import { Box, Text, useInput, useApp, useStdout } from 'ink';
+import { Box, Text, useInput, useApp } from 'ink';
 import { useState, useEffect } from 'react';
 import { readFileSync } from 'fs';
+import { useTerminalSize, ScrollBar, useMouseScroll } from './shared/index.js';
 
 declare const onComplete: (result: unknown) => void;
 declare const args: {
@@ -59,7 +60,7 @@ function truncate(str: string, len: number): string {
 
 export default function TableViewer() {
   const { exit } = useApp();
-  const { stdout } = useStdout();
+  const { rows: termRows, columns: termCols } = useTerminalSize();
 
   const [rows, setRows] = useState<Row[]>([]);
   const [columns, setColumns] = useState<string[]>([]);
@@ -69,8 +70,8 @@ export default function TableViewer() {
 
   const title = args?.title || 'Table';
   const selectMode = args?.select === 'true';
-  const visibleRows = stdout?.rows ? Math.max(3, stdout.rows - 8) : 10;
-  const termWidth = stdout?.columns || 80;
+  const visibleRows = Math.max(3, termRows - 8);
+  const termWidth = termCols;
 
   useEffect(() => {
     try {
@@ -119,6 +120,10 @@ export default function TableViewer() {
   const maxScroll = Math.max(0, rows.length - visibleRows);
   const maxColWidth = Math.floor((termWidth - columns.length * 3 - 4) / columns.length);
   const colWidths = columns.length > 0 ? getColumnWidths(rows, columns, maxColWidth) : [];
+  const showScrollBar = rows.length > visibleRows;
+
+  // Mouse scroll support
+  useMouseScroll({ scroll, maxScroll, setScroll });
 
   useInput((input, key) => {
     if (input === 'q' || key.escape) {
@@ -188,64 +193,72 @@ export default function TableViewer() {
   }
 
   const displayRows = rows.slice(scroll, scroll + visibleRows);
+  const scrollPosition = maxScroll > 0 ? scroll / maxScroll : 0;
 
   // Build table borders
-  const topBorder = '┌' + colWidths.map(w => '─'.repeat(w + 2)).join('┬') + '┐';
-  const headerSep = '├' + colWidths.map(w => '─'.repeat(w + 2)).join('┼') + '┤';
-  const bottomBorder = '└' + colWidths.map(w => '─'.repeat(w + 2)).join('┴') + '┘';
+  const topBorder = '\u250C' + colWidths.map(w => '\u2500'.repeat(w + 2)).join('\u252C') + '\u2510';
+  const headerSep = '\u251C' + colWidths.map(w => '\u2500'.repeat(w + 2)).join('\u253C') + '\u2524';
+  const bottomBorder = '\u2514' + colWidths.map(w => '\u2500'.repeat(w + 2)).join('\u2534') + '\u2518';
 
   return (
     <Box flexDirection="column">
       <Box paddingX={1}>
         <Text dimColor>{title} ({rows.length} rows)</Text>
-        {rows.length > visibleRows && (
+        {showScrollBar && (
           <Text dimColor> [{scroll + 1}-{Math.min(scroll + visibleRows, rows.length)}]</Text>
         )}
       </Box>
 
-      <Box flexDirection="column" paddingX={1}>
-        {/* Top border */}
-        <Text dimColor>{topBorder}</Text>
+      <Box flexDirection="row">
+        <Box flexDirection="column" paddingX={1} flexGrow={1}>
+          {/* Top border */}
+          <Text dimColor>{topBorder}</Text>
 
-        {/* Header row */}
-        <Text>
-          <Text dimColor>│</Text>
-          {columns.map((col, i) => (
-            <Text key={col}>
-              <Text bold color="cyan"> {truncate(col, colWidths[i])} </Text>
-              <Text dimColor>│</Text>
-            </Text>
-          ))}
-        </Text>
+          {/* Header row */}
+          <Text>
+            <Text dimColor>{'\u2502'}</Text>
+            {columns.map((col, i) => (
+              <Text key={col}>
+                <Text bold color="cyan"> {truncate(col, colWidths[i])} </Text>
+                <Text dimColor>{'\u2502'}</Text>
+              </Text>
+            ))}
+          </Text>
 
-        {/* Header separator */}
-        <Text dimColor>{headerSep}</Text>
+          {/* Header separator */}
+          <Text dimColor>{headerSep}</Text>
 
-        {/* Data rows */}
-        {displayRows.map((row, displayIdx) => {
-          const actualIdx = scroll + displayIdx;
-          const isSelected = selectMode && actualIdx === selectedRow;
+          {/* Data rows */}
+          {displayRows.map((row, displayIdx) => {
+            const actualIdx = scroll + displayIdx;
+            const isSelected = selectMode && actualIdx === selectedRow;
 
-          return (
-            <Text key={actualIdx} inverse={isSelected}>
-              <Text dimColor>│</Text>
-              {columns.map((col, i) => (
-                <Text key={col}>
-                  <Text> {truncate(String(row[col] ?? ''), colWidths[i])} </Text>
-                  <Text dimColor>│</Text>
-                </Text>
-              ))}
-            </Text>
-          );
-        })}
+            return (
+              <Text key={actualIdx} inverse={isSelected}>
+                <Text dimColor>{'\u2502'}</Text>
+                {columns.map((col, i) => (
+                  <Text key={col}>
+                    <Text> {truncate(String(row[col] ?? ''), colWidths[i])} </Text>
+                    <Text dimColor>{'\u2502'}</Text>
+                  </Text>
+                ))}
+              </Text>
+            );
+          })}
 
-        {/* Bottom border */}
-        <Text dimColor>{bottomBorder}</Text>
+          {/* Bottom border */}
+          <Text dimColor>{bottomBorder}</Text>
+        </Box>
+
+        {showScrollBar && (
+          <ScrollBar position={scrollPosition} height={displayRows.length + 3} />
+        )}
       </Box>
 
       <Box paddingX={1}>
         <Text dimColor>
           ↑↓/jk=scroll  PgUp/PgDn  {selectMode ? 'Enter=select  ' : ''}q=close
+          {showScrollBar ? '  mouse=scroll' : ''}
         </Text>
       </Box>
     </Box>

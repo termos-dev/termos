@@ -83,14 +83,18 @@ export const componentSchemas: Record<string, ComponentSchema> = {
       file: { type: "string", required: true, description: "Path to source file" },
       highlight: { type: "string", description: "Line range to highlight (e.g. '10-20')" },
       line: { type: "number", description: "Scroll to line number" },
+      editor: { type: "string", description: "Editor command with {line} placeholder (e.g. 'code --goto', 'vim +{line}')" },
     },
     returns: {
-      action: "accept",
+      action: "accept | edit",
       file: "string - path to file",
+      line: "number - current line (when action=edit)",
+      editor: "string - editor command (when action=edit)",
     },
     examples: [
       'termos run --title "Code" code --file src/index.ts',
       'termos run --title "Code" code --file src/app.tsx --highlight "15-25" --line 15',
+      'termos run --title "Code" code --file src/index.ts --editor "code --goto"',
     ],
   },
 
@@ -309,6 +313,53 @@ export const componentSchemas: Record<string, ComponentSchema> = {
 };
 
 /**
+ * Valid position presets
+ */
+export const POSITION_PRESETS = [
+  "floating",
+  "floating:center",
+  "floating:top-left",
+  "floating:top-right",
+  "floating:bottom-left",
+  "floating:bottom-right",
+  "split",
+  "split:right",
+  "split:down",
+  "tab",
+] as const;
+
+/**
+ * Global options schema - applies to all `termos run` commands
+ */
+export const globalOptionsSchema: Record<string, ArgSchema> = {
+  position: {
+    type: "string",
+    required: true,
+    description: `Pane position preset: ${POSITION_PRESETS.join(", ")}`,
+  },
+  title: {
+    type: "string",
+    required: true,
+    description: "Title for the pane",
+  },
+  session: {
+    type: "string",
+    required: false,
+    description: "Session name (auto-generated from dir name on macOS)",
+  },
+  cmd: {
+    type: "string",
+    required: false,
+    description: "Inline shell command (supports &&, |, ||, etc.)",
+  },
+  "cmd-file": {
+    type: "string",
+    required: false,
+    description: "Read command from file",
+  },
+};
+
+/**
  * Generate help text for a component
  */
 export function generateComponentHelp(schema: ComponentSchema): string {
@@ -353,6 +404,18 @@ export function generateComponentHelp(schema: ComponentSchema): string {
 }
 
 /**
+ * Generate help text for global options from schema
+ */
+function generateGlobalOptionsHelp(): string {
+  const lines: string[] = [];
+  for (const [name, arg] of Object.entries(globalOptionsSchema)) {
+    const req = arg.required ? '(required)' : '';
+    lines.push(`  --${name.padEnd(20)} ${arg.description} ${req}`.trimEnd());
+  }
+  return lines.join('\n');
+}
+
+/**
  * Generate full help text for all components
  */
 export function generateFullHelp(): string {
@@ -377,15 +440,7 @@ Command Execution:
     termos run --title "List" -- ls -la
 
 Global Options:
-  --session <name>            Session name (auto-generated from dir name on macOS; required on Linux/Windows outside Zellij)
-  --title "Text"              Title (required)
-  --cmd "Command"             Inline shell command (supports &&, |, ||, etc.)
-  --cmd-file <path>           Read command from file
-  --position <preset>         Pane position preset (default: floating for components, tab for commands)
-                              Floating: floating, floating:center, floating:top-left, floating:top-right,
-                                        floating:bottom-left, floating:bottom-right
-                              Split (Zellij only): split, split:right, split:down
-                              Tab: tab
+${generateGlobalOptionsHelp()}
   Note: split positions only work in Zellij; other hosts fall back to a new window/tab
 `);
 
@@ -405,7 +460,7 @@ Global Options:
   Create .tsx files with a default export React component.
   Use global onComplete(result) to return data.
   Pass arguments via --key value flags.
-  Use --position to control placement (default: floating).
+  Use --position to control placement (required).
 `);
 
   return sections.join('\n');

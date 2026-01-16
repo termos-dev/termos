@@ -1,15 +1,8 @@
-import { Box, Text, useInput, useApp, useStdout } from 'ink';
+import { Box, Text, useInput, useApp } from 'ink';
 import { useState, useEffect, useMemo } from 'react';
 import { readFileSync, readdirSync, statSync } from 'fs';
 import { join, basename } from 'path';
-
-/**
- * Calculate ideal height (in rows) based on component args
- * Tree is scrollable, so use a reasonable fixed default
- */
-export function calculateHeight(_args: Record<string, string>): number {
-  return 15; // scrollable tree, fixed height
-}
+import { useTerminalSize, ScrollBar, useMouseScroll } from './shared/index.js';
 
 declare const onComplete: (result: unknown) => void;
 declare const args: {
@@ -128,7 +121,7 @@ function getTreePrefix(isLast: boolean[]): string {
 
 export default function Tree() {
   const { exit } = useApp();
-  const { stdout } = useStdout();
+  const { rows } = useTerminalSize();
 
   const [root, setRoot] = useState<TreeNode | null>(null);
   const [selectedIdx, setSelectedIdx] = useState(0);
@@ -138,7 +131,7 @@ export default function Tree() {
   const title = args?.title || 'Tree';
   const maxDepth = parseInt(args?.depth || '5', 10);
   const showHidden = args?.showHidden === 'true';
-  const visibleRows = stdout?.rows ? Math.max(3, stdout.rows - 6) : 15;
+  const visibleRows = Math.max(3, rows - 6);
 
   useEffect(() => {
     try {
@@ -169,6 +162,10 @@ export default function Tree() {
   }, [root]);
 
   const maxScroll = Math.max(0, flatNodes.length - visibleRows);
+  const showScrollBar = flatNodes.length > visibleRows;
+
+  // Mouse scroll support
+  useMouseScroll({ scroll, maxScroll, setScroll });
 
   const toggleExpand = (idx: number) => {
     const flatNode = flatNodes[idx];
@@ -276,39 +273,47 @@ export default function Tree() {
   }
 
   const displayNodes = flatNodes.slice(scroll, scroll + visibleRows);
+  const scrollPosition = maxScroll > 0 ? scroll / maxScroll : 0;
 
   return (
     <Box flexDirection="column" paddingX={1}>
-      <Box flexDirection="column">
-        {displayNodes.map((flatNode, displayIdx) => {
-          const actualIdx = scroll + displayIdx;
-          const isSelected = actualIdx === selectedIdx;
-          const { node, isLast } = flatNode;
-          const prefix = getTreePrefix(isLast);
+      <Box flexDirection="row">
+        <Box flexDirection="column" flexGrow={1}>
+          {displayNodes.map((flatNode, displayIdx) => {
+            const actualIdx = scroll + displayIdx;
+            const isSelected = actualIdx === selectedIdx;
+            const { node, isLast } = flatNode;
+            const prefix = getTreePrefix(isLast);
 
-          const icon = node.type === 'directory'
-            ? (node.expanded ? '📂' : '📁')
-            : '📄';
+            const icon = node.type === 'directory'
+              ? (node.expanded ? '\uD83D\uDCC2' : '\uD83D\uDCC1')
+              : '\uD83D\uDCC4';
 
-          return (
-            <Box key={actualIdx}>
-              <Text dimColor>{prefix}</Text>
-              <Text inverse={isSelected}>
-                {icon} <Text bold={isSelected} color={node.type === 'directory' ? 'cyan' : undefined}>
-                  {node.name}
+            return (
+              <Box key={actualIdx}>
+                <Text dimColor>{prefix}</Text>
+                <Text inverse={isSelected}>
+                  {icon} <Text bold={isSelected} color={node.type === 'directory' ? 'cyan' : undefined}>
+                    {node.name}
+                  </Text>
+                  {node.type === 'directory' && node.children && (
+                    <Text dimColor> ({node.children.length})</Text>
+                  )}
                 </Text>
-                {node.type === 'directory' && node.children && (
-                  <Text dimColor> ({node.children.length})</Text>
-                )}
-              </Text>
-            </Box>
-          );
-        })}
+              </Box>
+            );
+          })}
+        </Box>
+
+        {showScrollBar && (
+          <ScrollBar position={scrollPosition} height={displayNodes.length} />
+        )}
       </Box>
 
       <Box marginTop={1}>
         <Text dimColor>
           ↑↓=navigate  ←→/Space=expand/collapse  Enter=select  q=close
+          {showScrollBar ? '  mouse=scroll' : ''}
         </Text>
       </Box>
     </Box>

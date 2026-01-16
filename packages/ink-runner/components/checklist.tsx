@@ -1,5 +1,6 @@
-import { Box, Text, useInput, useApp, useStdout } from 'ink';
+import { Box, Text, useInput, useApp } from 'ink';
 import { useState } from 'react';
+import { useTerminalSize, ScrollBar, useMouseScroll } from './shared/index.js';
 
 declare const onComplete: (result: unknown) => void;
 declare const args: {
@@ -16,7 +17,7 @@ interface Item {
 
 export default function Checklist() {
   const { exit } = useApp();
-  const { stdout } = useStdout();
+  const { rows } = useTerminalSize();
 
   const title = args?.title || 'Checklist';
   const rawItems = args?.items || args?.options || '';
@@ -79,8 +80,12 @@ export default function Checklist() {
   const [cursor, setCursor] = useState(0);
   const [scroll, setScroll] = useState(0);
 
-  const visibleLines = stdout?.rows ? Math.max(5, stdout.rows - 6) : 10;
+  const visibleLines = Math.max(5, rows - 8);
   const maxScroll = Math.max(0, items.length - visibleLines);
+  const showScrollBar = items.length > visibleLines;
+
+  // Mouse scroll support
+  useMouseScroll({ scroll, maxScroll, setScroll });
 
   useInput((input, key) => {
     if (input === 'q' || key.escape) {
@@ -143,51 +148,56 @@ export default function Checklist() {
 
   const displayItems = items.slice(scroll, scroll + visibleLines);
   const checkedCount = items.filter(i => i.checked).length;
+  const scrollPosition = maxScroll > 0 ? scroll / maxScroll : 0;
 
   return (
     <Box flexDirection="column" paddingX={1}>
       <Box marginBottom={1}>
         <Text bold color="cyan">{title}</Text>
         <Text dimColor> ({checkedCount}/{items.length} checked)</Text>
+        {showScrollBar && (
+          <Text dimColor> ({scroll + 1}-{Math.min(scroll + visibleLines, items.length)}/{items.length})</Text>
+        )}
       </Box>
 
-      <Box flexDirection="column">
-        {displayItems.map((item, displayIdx) => {
-          const actualIdx = scroll + displayIdx;
-          const isSelected = actualIdx === cursor;
-          const checkbox = item.checked ? '☑' : '☐';
-          const checkColor = item.checked ? 'green' : 'gray';
+      <Box flexDirection="row">
+        <Box flexDirection="column" flexGrow={1}>
+          {displayItems.map((item, displayIdx) => {
+            const actualIdx = scroll + displayIdx;
+            const isSelected = actualIdx === cursor;
+            const checkbox = item.checked ? '\u2611' : '\u2610';
+            const checkColor = item.checked ? 'green' : 'gray';
 
-          return (
-            <Box key={actualIdx}>
-              <Text inverse={isSelected}>
-                <Text color={checkColor}>{checkbox}</Text>
-                <Text> {item.label}</Text>
-              </Text>
-            </Box>
-          );
-        })}
+            return (
+              <Box key={actualIdx}>
+                <Text inverse={isSelected}>
+                  <Text color={checkColor}>{checkbox}</Text>
+                  <Text> {item.label}</Text>
+                </Text>
+              </Box>
+            );
+          })}
 
-        {/* Done button */}
-        <Box marginTop={1}>
-          <Text
-            inverse={cursor === items.length}
-            color={cursor === items.length ? 'green' : undefined}
-            bold={cursor === items.length}
-          >
-            {'  '}[Done]{'  '}
-          </Text>
+          {/* Done button */}
+          <Box marginTop={1}>
+            <Text
+              inverse={cursor === items.length}
+              color={cursor === items.length ? 'green' : undefined}
+              bold={cursor === items.length}
+            >
+              {'  '}[Done]{'  '}
+            </Text>
+          </Box>
         </Box>
+
+        {showScrollBar && (
+          <ScrollBar position={scrollPosition} height={displayItems.length} />
+        )}
       </Box>
-
-      {items.length > visibleLines && (
-        <Box marginTop={1}>
-          <Text dimColor>({scroll + 1}-{Math.min(scroll + visibleLines, items.length)}/{items.length})</Text>
-        </Box>
-      )}
 
       <Box marginTop={1}>
         <Text dimColor>Space=toggle  a=all  n=none  ↑↓=nav  Enter=done  q=cancel</Text>
+        {showScrollBar && <Text dimColor>  mouse=scroll</Text>}
       </Box>
     </Box>
   );

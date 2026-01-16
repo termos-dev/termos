@@ -1,14 +1,7 @@
-import { Box, Text, useInput, useApp, useStdout } from 'ink';
+import { Box, Text, useInput, useApp } from 'ink';
 import { useState, useEffect, useMemo } from 'react';
 import { readFileSync } from 'fs';
-
-/**
- * Calculate ideal height (in rows) based on component args
- * JSON is scrollable, so use a reasonable fixed default
- */
-export function calculateHeight(_args: Record<string, string>): number {
-  return 15; // scrollable JSON viewer, fixed height
-}
+import { useTerminalSize, ScrollBar, useMouseScroll } from './shared/index.js';
 
 declare const onComplete: (result: unknown) => void;
 declare const args: {
@@ -103,7 +96,7 @@ function formatValue(value: unknown, type: JsonNode['type']): { text: string; co
 
 export default function JsonViewer() {
   const { exit } = useApp();
-  const { stdout } = useStdout();
+  const { rows } = useTerminalSize();
 
   const [data, setData] = useState<unknown>(null);
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
@@ -113,7 +106,7 @@ export default function JsonViewer() {
 
   const title = args?.title || 'JSON Viewer';
   const expandDepth = parseInt(args?.expandDepth || '2', 10);
-  const visibleRows = stdout?.rows ? Math.max(3, stdout.rows - 6) : 15;
+  const visibleRows = Math.max(3, rows - 6);
 
   useEffect(() => {
     try {
@@ -156,6 +149,10 @@ export default function JsonViewer() {
   }, [data, expandedPaths, expandDepth]);
 
   const maxScroll = Math.max(0, flatNodes.length - visibleRows);
+  const showScrollBar = flatNodes.length > visibleRows;
+
+  // Mouse scroll support
+  useMouseScroll({ scroll, maxScroll, setScroll });
 
   const toggleExpand = (path: string) => {
     setExpandedPaths(prev => {
@@ -273,55 +270,63 @@ export default function JsonViewer() {
   }
 
   const displayNodes = flatNodes.slice(scroll, scroll + visibleRows);
+  const scrollPosition = maxScroll > 0 ? scroll / maxScroll : 0;
 
   return (
     <Box flexDirection="column" paddingX={1}>
-      <Box flexDirection="column">
-        {displayNodes.map((flatNode, displayIdx) => {
-          const actualIdx = scroll + displayIdx;
-          const isSelected = actualIdx === selectedIdx;
-          const { node, depth } = flatNode;
-          const indent = getIndent(depth);
+      <Box flexDirection="row">
+        <Box flexDirection="column" flexGrow={1}>
+          {displayNodes.map((flatNode, displayIdx) => {
+            const actualIdx = scroll + displayIdx;
+            const isSelected = actualIdx === selectedIdx;
+            const { node, depth } = flatNode;
+            const indent = getIndent(depth);
 
-          const isExpandable = node.type === 'object' || node.type === 'array';
-          const expandIcon = isExpandable
-            ? (node.expanded ? '▼' : '▶')
-            : ' ';
+            const isExpandable = node.type === 'object' || node.type === 'array';
+            const expandIcon = isExpandable
+              ? (node.expanded ? '\u25BC' : '\u25B6')
+              : ' ';
 
-          const bracket = node.type === 'array' ? '[]' : node.type === 'object' ? '{}' : '';
-          const formatted = !isExpandable ? formatValue(node.value, node.type) : null;
+            const bracket = node.type === 'array' ? '[]' : node.type === 'object' ? '{}' : '';
+            const formatted = !isExpandable ? formatValue(node.value, node.type) : null;
 
-          return (
-            <Box key={actualIdx}>
-              <Text inverse={isSelected}>
-                <Text dimColor>{indent}</Text>
-                <Text color={isExpandable ? 'cyan' : 'gray'}>{expandIcon} </Text>
-                {node.key !== null && (
-                  <>
-                    <Text color="blue">"{node.key}"</Text>
-                    <Text dimColor>: </Text>
-                  </>
-                )}
-                {isExpandable ? (
-                  <>
-                    <Text dimColor>{bracket}</Text>
-                    {node.childCount !== undefined && (
-                      <Text dimColor> ({node.childCount} items)</Text>
-                    )}
-                  </>
-                ) : (
-                  <Text color={formatted!.color}>{formatted!.text}</Text>
-                )}
-              </Text>
-            </Box>
-          );
-        })}
+            return (
+              <Box key={actualIdx}>
+                <Text inverse={isSelected}>
+                  <Text dimColor>{indent}</Text>
+                  <Text color={isExpandable ? 'cyan' : 'gray'}>{expandIcon} </Text>
+                  {node.key !== null && (
+                    <>
+                      <Text color="blue">"{node.key}"</Text>
+                      <Text dimColor>: </Text>
+                    </>
+                  )}
+                  {isExpandable ? (
+                    <>
+                      <Text dimColor>{bracket}</Text>
+                      {node.childCount !== undefined && (
+                        <Text dimColor> ({node.childCount} items)</Text>
+                      )}
+                    </>
+                  ) : (
+                    <Text color={formatted!.color}>{formatted!.text}</Text>
+                  )}
+                </Text>
+              </Box>
+            );
+          })}
+        </Box>
+
+        {showScrollBar && (
+          <ScrollBar position={scrollPosition} height={displayNodes.length} />
+        )}
       </Box>
 
       <Box marginTop={1}>
         <Text dimColor>
           ↑↓=navigate  ←→/Space=toggle  e=expand all  c=collapse all  q=close
         </Text>
+        {showScrollBar && <Text dimColor>  mouse=scroll</Text>}
       </Box>
     </Box>
   );

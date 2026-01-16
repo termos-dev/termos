@@ -1,6 +1,7 @@
-import { Box, Text, useInput, useApp, useStdout } from 'ink';
-import { useState, useEffect } from 'react';
+import { Box, Text, useInput, useApp } from 'ink';
+import { useState } from 'react';
 import { readFileSync } from 'fs';
+import { useTerminalSize, ScrollBar, useMouseScroll } from './shared/index.js';
 
 declare const onComplete: (result: unknown) => void;
 declare const args: { file?: string };
@@ -44,7 +45,7 @@ function renderLine(line: string, idx: number) {
 
 export default function PlanViewer() {
   const { exit } = useApp();
-  const { stdout } = useStdout();
+  const { rows } = useTerminalSize();
   const [scroll, setScroll] = useState(0);
 
   const filePath = args?.file;
@@ -61,8 +62,12 @@ export default function PlanViewer() {
     }
   }
 
-  const visibleLines = stdout?.rows ? stdout.rows - 6 : 20;
+  const visibleLines = Math.max(5, rows - 6);
   const maxScroll = Math.max(0, lines.length - visibleLines);
+  const showScrollBar = lines.length > visibleLines;
+
+  // Mouse scroll support
+  useMouseScroll({ scroll, maxScroll, setScroll });
 
   useInput((input, key) => {
     if (input === 'y' || input === 'Y') {
@@ -88,18 +93,25 @@ export default function PlanViewer() {
   });
 
   const displayLines = lines.slice(scroll, scroll + visibleLines);
+  const scrollPosition = maxScroll > 0 ? scroll / maxScroll : 0;
 
   return (
     <Box flexDirection="column" padding={1}>
       <Box borderStyle="round" borderColor="cyan" paddingX={1}>
         <Text bold color="cyan">Plan Review</Text>
-        {lines.length > visibleLines && (
+        {showScrollBar && (
           <Text dimColor> ({scroll + 1}-{Math.min(scroll + visibleLines, lines.length)}/{lines.length})</Text>
         )}
       </Box>
 
-      <Box flexDirection="column" marginY={1}>
-        {displayLines.map((line, idx) => renderLine(line, idx))}
+      <Box flexDirection="row" marginY={1}>
+        <Box flexDirection="column" flexGrow={1}>
+          {displayLines.map((line, idx) => renderLine(line, idx))}
+        </Box>
+
+        {showScrollBar && (
+          <ScrollBar position={scrollPosition} height={displayLines.length} />
+        )}
       </Box>
 
       <Box borderStyle="single" borderColor="gray" paddingX={1}>
@@ -109,6 +121,7 @@ export default function PlanViewer() {
           <Text color="red" bold>N</Text><Text dimColor>=reject</Text>
           <Text> </Text>
           <Text dimColor>↑↓/jk=scroll</Text>
+          {showScrollBar && <Text dimColor>  mouse=scroll</Text>}
         </Text>
       </Box>
     </Box>

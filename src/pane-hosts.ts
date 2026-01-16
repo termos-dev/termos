@@ -34,12 +34,12 @@ export const VALID_POSITIONS: PositionPreset[] = [
 ];
 
 export const FLOATING_PRESETS: Record<string, { x: string; y: string; width: string; height: string }> = {
-  "floating":              { x: "60", y: "5",  width: "40", height: "50" },
-  "floating:center":       { x: "30", y: "25", width: "40", height: "50" },
-  "floating:top-left":     { x: "0",  y: "5",  width: "40", height: "50" },
-  "floating:top-right":    { x: "60", y: "5",  width: "40", height: "50" },
-  "floating:bottom-left":  { x: "0",  y: "45", width: "40", height: "50" },
-  "floating:bottom-right": { x: "60", y: "45", width: "40", height: "50" },
+  "floating":              { x: "68%", y: "5%",  width: "30%", height: "40%" },
+  "floating:center":       { x: "35%", y: "30%", width: "30%", height: "40%" },
+  "floating:top-left":     { x: "2%",  y: "5%",  width: "30%", height: "40%" },
+  "floating:top-right":    { x: "68%", y: "5%",  width: "30%", height: "40%" },
+  "floating:bottom-left":  { x: "2%",  y: "55%", width: "30%", height: "40%" },
+  "floating:bottom-right": { x: "68%", y: "55%", width: "30%", height: "40%" },
 };
 
 export interface PaneRunOptions {
@@ -58,22 +58,15 @@ export interface PaneHost {
   close?(name?: string): Promise<void>;
 }
 
-function resolveSessionName(
-  cwd: string,
-  override?: string
-): { name: string; inZellij: boolean; explicit: boolean } {
+function resolveSessionName(cwd: string): { name: string; inZellij: boolean } {
   const zellijName = process.env.ZELLIJ_SESSION_NAME;
   if (zellijName && zellijName.trim().length > 0) {
-    return { name: zellijName.trim(), inZellij: true, explicit: false };
+    return { name: zellijName.trim(), inZellij: true };
   }
 
-  const explicit = override ?? process.env.TERMOS_SESSION_NAME;
-  if (explicit && explicit.trim().length > 0) {
-    return { name: explicit.trim(), inZellij: false, explicit: true };
-  }
-
+  // Session name is always derived from cwd
   const base = path.basename(cwd || process.cwd()) || "session";
-  return { name: normalizeSessionName(base), inZellij: false, explicit: false };
+  return { name: normalizeSessionName(base), inZellij: false };
 }
 
 function shellEscape(value: string): string {
@@ -269,8 +262,8 @@ end tell`;
   return host;
 }
 
-export function selectPaneHost(cwd: string, sessionNameOverride?: string): PaneHost {
-  const resolved = resolveSessionName(cwd, sessionNameOverride);
+export function selectPaneHost(cwd: string): PaneHost {
+  const resolved = resolveSessionName(cwd);
 
   if (resolved.inZellij) {
     return createZellijHost(resolved.name);
@@ -283,10 +276,6 @@ export function selectPaneHost(cwd: string, sessionNameOverride?: string): PaneH
     return createMacTerminalHost(resolved.name);
   }
 
-  // Linux/Windows require Zellij or explicit session name
-  if (!resolved.explicit) {
-    throw new Error("termos must be run inside a Zellij session on this platform. Provide --session <name> or set TERMOS_SESSION_NAME.");
-  }
-
-  throw new Error("termos must be run inside a Zellij session on this platform.");
+  // Linux/Windows require Zellij
+  throw new Error("termos must be run inside a Zellij session on Linux/Windows.");
 }

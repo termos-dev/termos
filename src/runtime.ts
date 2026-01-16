@@ -32,3 +32,29 @@ export function ensureEventsFile(sessionName: string): string {
   }
   return filePath;
 }
+
+// Heartbeat file management for session lifecycle
+export function getHeartbeatPath(sessionName: string): string {
+  return path.join(getSessionRuntimeDir(sessionName), "heartbeat");
+}
+
+export function ensureHeartbeat(sessionName: string): void {
+  const p = getHeartbeatPath(sessionName);
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.closeSync(fs.openSync(p, "w"));
+}
+
+export function touchHeartbeat(sessionName: string): void {
+  const p = getHeartbeatPath(sessionName);
+  const now = new Date();
+  fs.utimesSync(p, now, now);
+}
+
+export function isHeartbeatFresh(sessionName: string, maxAgeMs = 2000): boolean {
+  try {
+    const stat = fs.statSync(getHeartbeatPath(sessionName));
+    return Date.now() - stat.mtimeMs < maxAgeMs;
+  } catch {
+    return false;
+  }
+}

@@ -18,6 +18,8 @@ export {
 // Component schemas for CLI help generation
 export {
   componentSchemas,
+  globalOptionsSchema,
+  POSITION_PRESETS,
   generateComponentHelp,
   generateFullHelp,
   type ArgSchema,

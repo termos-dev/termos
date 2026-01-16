@@ -99,6 +99,7 @@ export async function runFromFile(
   // Get events file path from env (passed by InteractionManager)
   const eventsFile = process.env.MCP_EVENTS_FILE || "";
   const interactionId = process.env.MCP_INTERACTION_ID || "";
+  const heartbeatFile = process.env.TERMOS_HEARTBEAT_FILE || "";
 
   try {
     // Create entry file that wraps the user's component
@@ -106,12 +107,13 @@ export async function runFromFile(
     const entryScript = `
 import { render } from 'ink';
 import React from 'react';
-import { appendFileSync } from 'fs';
+import { appendFileSync, statSync } from 'fs';
 import Component from ${JSON.stringify(absFilePath)};
 
 // Events file path from environment
 const __eventsFile = ${JSON.stringify(eventsFile)};
 const __interactionId = ${JSON.stringify(interactionId)};
+const __heartbeatFile = ${JSON.stringify(heartbeatFile)};
 
 // Arguments passed to the component
 globalThis.args = ${componentArgsJson};
@@ -148,6 +150,26 @@ const __emitCancel = () => {
     process.exit(1);
   });
 });
+
+// Heartbeat check - exit if session ends
+if (__heartbeatFile) {
+  const __checkHeartbeat = () => {
+    try {
+      const stat = statSync(__heartbeatFile);
+      const age = Date.now() - stat.mtimeMs;
+      if (age > 2000) {
+        // Session ended, exit gracefully
+        __emitCancel();
+        process.exit(0);
+      }
+    } catch {
+      // Heartbeat file gone, exit
+      __emitCancel();
+      process.exit(0);
+    }
+  };
+  setInterval(__checkHeartbeat, 1000);
+}
 
 // Validate default export
 if (!Component) {

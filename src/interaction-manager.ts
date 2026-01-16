@@ -8,7 +8,7 @@ import {
   type FormSchema,
 } from "@termosdev/shared";
 import { findResultEvent } from "./events.js";
-import { ensureEventsFile, getSessionRuntimeDir } from "./runtime.js";
+import { ensureEventsFile, getSessionRuntimeDir, getHeartbeatPath } from "./runtime.js";
 import { type PaneHost, selectPaneHost, type PositionPreset } from "./pane-hosts.js";
 
 // ESM compatibility for __dirname
@@ -79,7 +79,7 @@ export class InteractionManager extends EventEmitter {
     super();
     this.pollIntervalMs = options.pollIntervalMs ?? 500;
     this.cwd = options.cwd ?? process.cwd();
-    this.host = options.host ?? selectPaneHost(this.cwd, options.sessionName);
+    this.host = options.host ?? selectPaneHost(this.cwd);
     this.sessionName = this.host.sessionName;
 
     // Find runner path relative to this module
@@ -204,10 +204,15 @@ export class InteractionManager extends EventEmitter {
     const id = options.id ?? this.generateId();
     const eventsFile = this.getEventsFile();
     const pidFile = path.join(getSessionRuntimeDir(this.sessionName), `pid-${id}.txt`);
-    const env = {
+    const heartbeatPath = getHeartbeatPath(this.sessionName);
+    const env: Record<string, string> = {
       ...buildInteractionEnv(id, eventsFile),
       TERMOS_PID_FILE: pidFile,
     };
+    // Only pass heartbeat if file exists (managed session, not --stream mode)
+    if (fs.existsSync(heartbeatPath)) {
+      env.TERMOS_HEARTBEAT_FILE = heartbeatPath;
+    }
     const shellEscape = (s: string) => s.replace(/'/g, "'\\''");
     const nodeBin = process.env.TERMOS_NODE || process.execPath || "node";
     const nodeCmd = shellEscape(nodeBin);
@@ -267,7 +272,25 @@ export class InteractionManager extends EventEmitter {
         "    fi",
         "  fi",
         "}",
-        "trap '__emit cancel' EXIT INT TERM HUP",
+        // Background heartbeat checker - exits shell if session ends
+        "__hb_pid=",
+        "if [ -n \"$TERMOS_HEARTBEAT_FILE\" ]; then",
+        "  (",
+        "    while true; do",
+        "      if [ ! -f \"$TERMOS_HEARTBEAT_FILE\" ]; then",
+        "        kill $$ 2>/dev/null; exit 0",
+        "      fi",
+        "      # Check file age using perl (cross-platform)",
+        "      __age=$(perl -e 'print time - (stat($ARGV[0]))[9]' \"$TERMOS_HEARTBEAT_FILE\" 2>/dev/null || echo 999)",
+        "      if [ \"$__age\" -gt 2 ]; then",
+        "        kill $$ 2>/dev/null; exit 0",
+        "      fi",
+        "      sleep 1",
+        "    done",
+        "  ) &",
+        "  __hb_pid=$!",
+        "fi",
+        "trap '__emit cancel; [ -n \"$__hb_pid\" ] && kill $__hb_pid 2>/dev/null' EXIT INT TERM HUP",
         options.command,
         "code=$?",
         // Show exit notification and wait for user to acknowledge
@@ -278,6 +301,7 @@ export class InteractionManager extends EventEmitter {
         "echo 'Press Enter to close...'",
         "read __dummy",
         "if [ $code -eq 0 ]; then __emit accept '{\"exitCode\":'$code'}'; else __emit decline '{\"exitCode\":'$code'}'; fi",
+        "[ -n \"$__hb_pid\" ] && kill $__hb_pid 2>/dev/null",
         "trap - EXIT INT TERM HUP",
       ].join("\n");
     } else {

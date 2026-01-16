@@ -1,6 +1,7 @@
-import { Box, Text, useInput, useApp, useStdout } from 'ink';
+import { Box, Text, useInput, useApp } from 'ink';
 import { useState, useEffect } from 'react';
 import { readFileSync, watchFile, unwatchFile } from 'fs';
+import { useTerminalSize, ScrollBar, useMouseScroll } from './shared/index.js';
 
 declare const onComplete: (result: unknown) => void;
 declare const args: { file?: string; title?: string };
@@ -36,7 +37,7 @@ function renderLine(line: string, idx: number) {
 
 export default function MarkdownViewer() {
   const { exit } = useApp();
-  const { stdout } = useStdout();
+  const { rows } = useTerminalSize();
   const [scroll, setScroll] = useState(0);
   const [content, setContent] = useState('');
   const [lines, setLines] = useState<string[]>([]);
@@ -69,8 +70,12 @@ export default function MarkdownViewer() {
     return () => unwatchFile(filePath);
   }, [filePath]);
 
-  const visibleLines = stdout?.rows ? stdout.rows - 4 : 20;
+  const visibleLines = Math.max(5, rows - 4);
   const maxScroll = Math.max(0, lines.length - visibleLines);
+  const showScrollBar = lines.length > visibleLines;
+
+  // Mouse scroll support
+  useMouseScroll({ scroll, maxScroll, setScroll });
 
   useInput((input, key) => {
     if (input === 'q' || key.escape) {
@@ -92,22 +97,30 @@ export default function MarkdownViewer() {
   });
 
   const displayLines = lines.slice(scroll, scroll + visibleLines);
+  const scrollPosition = maxScroll > 0 ? scroll / maxScroll : 0;
 
   return (
     <Box flexDirection="column">
       <Box paddingX={1}>
         <Text bold color="cyan">{title}</Text>
-        {lines.length > visibleLines && (
+        {showScrollBar && (
           <Text dimColor> ({scroll + 1}-{Math.min(scroll + visibleLines, lines.length)}/{lines.length})</Text>
         )}
       </Box>
 
-      <Box flexDirection="column" paddingX={1}>
-        {displayLines.map((line, idx) => renderLine(line, idx))}
+      <Box flexDirection="row">
+        <Box flexDirection="column" paddingX={1} flexGrow={1}>
+          {displayLines.map((line, idx) => renderLine(line, idx))}
+        </Box>
+
+        {showScrollBar && (
+          <ScrollBar position={scrollPosition} height={displayLines.length} />
+        )}
       </Box>
 
       <Box paddingX={1}>
-        <Text dimColor>q=close ↑↓/jk=scroll</Text>
+        <Text dimColor>q=close  ↑↓/jk=scroll  PgUp/PgDn</Text>
+        {showScrollBar && <Text dimColor>  mouse=scroll</Text>}
       </Box>
     </Box>
   );

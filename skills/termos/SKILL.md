@@ -75,6 +75,18 @@ Note: Split positions only work in Zellij. On macOS without Zellij, split falls 
 
 `termos run` is async by default. Overuse it to keep the user engaged and visible in the UI.
 
+**Important:** `termos run` commands return immediately with an interaction ID.
+Do NOT block/wait for results after each command. Instead:
+1. Fire off `termos run` commands (they return instantly)
+2. Continue working or launch more interactions in parallel
+3. Check the `termos up` output stream for results only when needed
+
+Anti-pattern (don't do this):
+- Run termos command → wait for result → run next command
+
+Correct pattern:
+- Run multiple termos commands in parallel → check results later when relevant
+
 ## Ask component
 
 Single question:

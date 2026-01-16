@@ -1,33 +1,7 @@
-import { Box, Text, useInput, useApp, useStdout } from 'ink';
+import { Box, Text, useInput, useApp } from 'ink';
 import { useState, useEffect, useMemo } from 'react';
 import { readFileSync } from 'fs';
-
-/**
- * Calculate ideal height (in rows) based on component args
- */
-export function calculateHeight(args: Record<string, string>): number {
-  try {
-    let itemCount = 5;
-    const items = args.items || args.options;
-    if (items) {
-      try {
-        const parsed = JSON.parse(items);
-        itemCount = Array.isArray(parsed) ? parsed.length : 5;
-      } catch {
-        itemCount = items.split(',').length;
-      }
-    } else if (args.file) {
-      const content = readFileSync(args.file, 'utf-8');
-      const parsed = JSON.parse(content);
-      itemCount = Array.isArray(parsed) ? parsed.length : 5;
-    }
-    // items + search bar (if enabled) + footer
-    const searchRows = args.search === 'true' ? 2 : 0;
-    return Math.min(20, Math.max(6, itemCount + searchRows + 2));
-  } catch {
-    return 10; // fallback
-  }
-}
+import { useTerminalSize, ScrollBar, useMouseScroll } from './shared/index.js';
 
 declare const onComplete: (result: unknown) => void;
 declare const args: {
@@ -86,7 +60,7 @@ function fuzzyMatch(text: string, query: string): boolean {
 
 export default function Select() {
   const { exit } = useApp();
-  const { stdout } = useStdout();
+  const { rows } = useTerminalSize();
 
   const [items, setItems] = useState<SelectItem[]>([]);
   const [selectedIdx, setSelectedIdx] = useState(0);
@@ -97,7 +71,7 @@ export default function Select() {
   const searchEnabled = args?.search === 'true';
   const title = args?.title || 'Select';
   const placeholder = args?.placeholder || 'Type to search...';
-  const visibleRows = stdout?.rows ? Math.max(3, stdout.rows - 8) : 10;
+  const visibleRows = Math.max(3, rows - 8);
 
   useEffect(() => {
     try {
@@ -140,6 +114,10 @@ export default function Select() {
   }, [items, searchQuery]);
 
   const maxScroll = Math.max(0, filteredItems.length - visibleRows);
+  const showScrollBar = filteredItems.length > visibleRows;
+
+  // Mouse scroll support
+  useMouseScroll({ scroll, maxScroll, setScroll });
 
   useInput((input, key) => {
     if (key.escape) {
@@ -211,6 +189,7 @@ export default function Select() {
   }
 
   const displayItems = filteredItems.slice(scroll, scroll + visibleRows);
+  const scrollPosition = maxScroll > 0 ? scroll / maxScroll : 0;
 
   return (
     <Box flexDirection="column" paddingX={1}>
@@ -222,25 +201,31 @@ export default function Select() {
         </Box>
       )}
 
-      <Box flexDirection="column">
-        {displayItems.map((item, displayIdx) => {
-          const actualIdx = scroll + displayIdx;
-          const isSelected = actualIdx === selectedIdx;
+      <Box flexDirection="row">
+        <Box flexDirection="column" flexGrow={1}>
+          {displayItems.map((item, displayIdx) => {
+            const actualIdx = scroll + displayIdx;
+            const isSelected = actualIdx === selectedIdx;
 
-          return (
-            <Box key={actualIdx}>
-              <Text color={isSelected ? 'cyan' : undefined}>
-                {isSelected ? '❯ ' : '  '}
-              </Text>
-              <Text bold={isSelected} inverse={isSelected}>
-                {item.label}
-              </Text>
-              {item.description && (
-                <Text dimColor> - {item.description}</Text>
-              )}
-            </Box>
-          );
-        })}
+            return (
+              <Box key={actualIdx}>
+                <Text color={isSelected ? 'cyan' : undefined}>
+                  {isSelected ? '\u276F ' : '  '}
+                </Text>
+                <Text bold={isSelected} inverse={isSelected}>
+                  {item.label}
+                </Text>
+                {item.description && (
+                  <Text dimColor> - {item.description}</Text>
+                )}
+              </Box>
+            );
+          })}
+        </Box>
+
+        {showScrollBar && (
+          <ScrollBar position={scrollPosition} height={displayItems.length} />
+        )}
       </Box>
 
       {filteredItems.length === 0 && searchQuery && (
@@ -251,6 +236,7 @@ export default function Select() {
         <Text dimColor>
           ↑↓=navigate  Enter=select  Esc=cancel
           {searchEnabled ? '  Type to filter' : ''}
+          {showScrollBar ? '  mouse=scroll' : ''}
         </Text>
       </Box>
     </Box>

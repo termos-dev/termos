@@ -5,9 +5,9 @@ import * as os from "os";
 import * as path from "path";
 import { fileURLToPath } from "url";
 import { InteractionManager, type InteractionResult } from "./interaction-manager.js";
-import { ensureEventsFile } from "./runtime.js";
+import { ensureEventsFile, ensureHeartbeat, touchHeartbeat } from "./runtime.js";
 import { selectPaneHost, VALID_POSITIONS, type PositionPreset } from "./pane-hosts.js";
-import { generateFullHelp, type FormSchema } from "@termosdev/shared";
+import { generateFullHelp, componentSchemas, globalOptionsSchema, type FormSchema } from "@termosdev/shared";
 import { startCommandWatcher, type ParseMode } from "./command-watcher.js";
 import { getComponentHeight, rowsToPercent } from "./height-calculator.js";
 import { loadMergedInstructions } from "./instructions-loader.js";
@@ -21,7 +21,8 @@ function showHelp(): void {
 termos - Interactive UI runner for Claude Code (Zellij, Ghostty, or macOS Terminal)
 
 Usage:
-  termos up [--session <name>]                     Stream events (long-running)
+  termos up                                        Start session (creates heartbeat, streams events)
+                                                   Run as background task; panes close when session ends.
 
   termos run --title <text> <component>            Run an Ink component (built-in or custom .tsx)
   termos run --title <text> --cmd "<command>"      Run a shell command (recommended for agents)
@@ -32,11 +33,10 @@ Built-in components: ask, confirm, checklist, code, diff, table, progress, merma
                      plan-viewer, chart, select, tree, json, gauge
 
 Options:
-  --session <name>      Session name (required outside Zellij; overrides TERMOS_SESSION_NAME)
   --title <text>        Title (required)
   --cmd "<string>"      Inline shell command (supports &&, |, ||, etc.)
   --cmd-file <path>     Read command from file
-  --position <preset>   Pane position preset (default: floating)
+  --position <preset>   Pane position preset (required)
                         Floating: floating, floating:center, floating:top-left, floating:top-right,
                                   floating:bottom-left, floating:bottom-right
                         Split (Zellij): split, split:right, split:down
@@ -48,6 +48,11 @@ Live Data Options:
   --parse <mode>        Output parsing: number | json | lines | raw | auto (default: auto)
 
   -h, --help            Show this help
+
+Session Lifecycle:
+  When 'termos up' is running, all spawned panes are tracked via heartbeat.
+  When the session ends (termos up exits), panes automatically close within 2 seconds.
+  Without 'termos up', panes persist until manually closed.
 
 Examples:
   termos run --title "Lines" gauge --watch-cmd "wc -l *.ts | awk '{print \\$1}'" --max 10000
@@ -61,43 +66,13 @@ Examples:
   }
 }
 
-function parseSessionArg(args: string[]): { sessionName?: string; rest: string[] } {
-  let sessionName: string | undefined;
-  const rest: string[] = [];
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    if (arg === "--session") {
-      const value = args[i + 1];
-      if (!value || value.startsWith("--")) {
-        console.error("Error: --session requires a value.");
-        process.exit(1);
-      }
-      sessionName = value;
-      i += 1;
-      continue;
-    }
-    if (arg.startsWith("--session=")) {
-      const value = arg.slice("--session=".length);
-      if (!value) {
-        console.error("Error: --session requires a value.");
-        process.exit(1);
-      }
-      sessionName = value;
-      continue;
-    }
-    rest.push(arg);
-  }
-  return { sessionName, rest };
-}
-
-async function handleUp(args: string[]): Promise<void> {
-  const { sessionName, rest } = parseSessionArg(args);
-  if (rest.includes("--json")) {
-    console.error("Error: --json is not supported. 'termos up' always streams.");
-    process.exit(1);
-  }
-  const host = selectPaneHost(process.cwd(), sessionName);
+async function handleUp(): Promise<void> {
+  const host = selectPaneHost(process.cwd());
   const eventsFile = ensureEventsFile(host.sessionName);
+
+  // Always start heartbeat
+  ensureHeartbeat(host.sessionName);
+  setInterval(() => touchHeartbeat(host.sessionName), 1000);
 
   console.log("Termos up is running.");
   console.log(`Session: ${host.sessionName}`);
@@ -159,12 +134,11 @@ async function handleRun(args: string[]): Promise<void> {
     process.exit(0);
   }
 
-  const { sessionName, rest } = parseSessionArg(args);
   let title: string | undefined;
   let position: PositionPreset | undefined;
-  const hasWait = rest.includes("--wait");
-  const hasNoWait = rest.includes("--no-wait");
-  const restArgs = rest.filter(
+  const hasWait = args.includes("--wait");
+  const hasNoWait = args.includes("--no-wait");
+  const restArgs = args.filter(
     arg => arg !== "--wait" && arg !== "--no-wait"
   );
 
@@ -257,8 +231,14 @@ async function handleRun(args: string[]): Promise<void> {
     console.log(JSON.stringify({ action: "cancel", error: message }));
   };
 
-  // Validate position preset
-  if (position && !VALID_POSITIONS.includes(position)) {
+  // Validate position is required
+  if (!position) {
+    emitRunError(`--position is required. Valid options: ${VALID_POSITIONS.join(", ")}`);
+    process.exit(1);
+  }
+
+  // Validate position preset is valid
+  if (!VALID_POSITIONS.includes(position)) {
     emitRunError(`Invalid position "${position}". Valid options: ${VALID_POSITIONS.join(", ")}`);
     process.exit(1);
   }
@@ -308,10 +288,7 @@ async function handleRun(args: string[]): Promise<void> {
   const component = restArgs[0]?.toLowerCase();
   const isCommandMode = cmdValue !== undefined || cmdFileValue !== undefined || sepIdx !== -1;
 
-  const host = selectPaneHost(process.cwd(), sessionName);
-
-  // Default position: tab for commands, floating for components
-  const effectivePosition: PositionPreset = position ?? (isCommandMode ? "tab" : "floating");
+  const host = selectPaneHost(process.cwd());
 
   let inkFile: string | undefined;
   let inkArgs: Record<string, string> | undefined;
@@ -490,7 +467,7 @@ async function handleRun(args: string[]): Promise<void> {
       schema,
       title: titleValue,
       timeoutMs: wait ? 300000 : 0,
-      position: effectivePosition,
+      position: position,
       component: "ask",
     });
 
@@ -608,6 +585,28 @@ async function handleRun(args: string[]): Promise<void> {
     process.on("SIGTERM", () => { cleanup(); process.exit(0); });
   }
 
+  // Validate component args against schema
+  if (!isCommandMode && component) {
+    const schema = componentSchemas[component];
+    if (schema?.args) {
+      // Check required args
+      for (const [argName, argDef] of Object.entries(schema.args)) {
+        if ((argDef as { required?: boolean }).required && !inkArgs?.[argName]) {
+          return emitRunError(`Missing required argument: --${argName}`);
+        }
+      }
+      // Warn on unknown args
+      if (inkArgs) {
+        const knownArgs = new Set(Object.keys(schema.args));
+        for (const argName of Object.keys(inkArgs)) {
+          if (!knownArgs.has(argName) && argName !== 'title') {
+            console.error(`Warning: Unknown argument --${argName} for component '${component}'`);
+          }
+        }
+      }
+    }
+  }
+
   ensureEventsFile(host.sessionName);
   const im = new InteractionManager({ cwd: process.cwd(), host });
   const componentName = isCommandMode ? undefined : component;
@@ -626,7 +625,7 @@ async function handleRun(args: string[]): Promise<void> {
     command,
     title: titleValue,
     timeoutMs: wait ? 300000 : 0,
-    position: effectivePosition,
+    position: position,
     component: componentName,
     isCommand: isCommandMode,
     heightPercent,
@@ -656,7 +655,7 @@ async function main() {
   }
 
   if (cmd === "up") {
-    await handleUp(args.slice(1));
+    await handleUp();
     return;
   }
 

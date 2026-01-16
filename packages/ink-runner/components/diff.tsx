@@ -1,8 +1,9 @@
-import { Box, Text, useInput, useApp, useStdout } from 'ink';
+import { Box, Text, useInput, useApp } from 'ink';
 import { useState, useEffect } from 'react';
 import { execFileSync } from 'child_process';
 import { readFileSync } from 'fs';
 import * as path from 'path';
+import { useTerminalSize, ScrollBar, useMouseScroll } from './shared/index.js';
 
 declare const onComplete: (result: unknown) => void;
 declare const args: {
@@ -110,7 +111,7 @@ function runGitDiff(file: string, staged: boolean): string {
 
 export default function DiffViewer() {
   const { exit } = useApp();
-  const { stdout } = useStdout();
+  const { rows } = useTerminalSize();
 
   const [lines, setLines] = useState<DiffLine[]>([]);
   const [scroll, setScroll] = useState(0);
@@ -118,7 +119,7 @@ export default function DiffViewer() {
   const [stats, setStats] = useState({ additions: 0, deletions: 0 });
 
   const title = args?.title || (args?.file ? path.basename(args.file) : 'Diff');
-  const visibleLines = stdout?.rows ? Math.max(5, stdout.rows - 6) : 20;
+  const visibleLines = Math.max(5, rows - 6);
 
   useEffect(() => {
     try {
@@ -156,6 +157,10 @@ export default function DiffViewer() {
   }, []);
 
   const maxScroll = Math.max(0, lines.length - visibleLines);
+  const showScrollBar = lines.length > visibleLines;
+
+  // Mouse scroll support
+  useMouseScroll({ scroll, maxScroll, setScroll });
 
   useInput((input, key) => {
     if (input === 'q' || key.escape) {
@@ -199,6 +204,7 @@ export default function DiffViewer() {
   }
 
   const displayLines = lines.slice(scroll, scroll + visibleLines);
+  const scrollPosition = maxScroll > 0 ? scroll / maxScroll : 0;
 
   return (
     <Box flexDirection="column">
@@ -206,48 +212,55 @@ export default function DiffViewer() {
         <Text bold color="cyan">{title}</Text>
         <Text color="green"> +{stats.additions}</Text>
         <Text color="red"> -{stats.deletions}</Text>
-        {lines.length > visibleLines && (
+        {showScrollBar && (
           <Text dimColor> ({scroll + 1}-{Math.min(scroll + visibleLines, lines.length)}/{lines.length})</Text>
         )}
       </Box>
 
-      <Box flexDirection="column" paddingX={1}>
-        {displayLines.map((line, idx) => {
-          let color: string | undefined;
-          let prefix = ' ';
+      <Box flexDirection="row">
+        <Box flexDirection="column" paddingX={1} flexGrow={1}>
+          {displayLines.map((line, idx) => {
+            let color: string | undefined;
+            let prefix = ' ';
 
-          switch (line.type) {
-            case 'add':
-              color = 'green';
-              prefix = '+';
-              break;
-            case 'remove':
-              color = 'red';
-              prefix = '-';
-              break;
-            case 'header':
-              color = 'yellow';
-              break;
-            case 'info':
-              color = 'cyan';
-              break;
-          }
+            switch (line.type) {
+              case 'add':
+                color = 'green';
+                prefix = '+';
+                break;
+              case 'remove':
+                color = 'red';
+                prefix = '-';
+                break;
+              case 'header':
+                color = 'yellow';
+                break;
+              case 'info':
+                color = 'cyan';
+                break;
+            }
 
-          return (
-            <Box key={idx}>
-              <Text color={color}>
-                {line.type === 'context' || line.type === 'add' || line.type === 'remove'
-                  ? `${prefix} ${line.content}`
-                  : line.content
-                }
-              </Text>
-            </Box>
-          );
-        })}
+            return (
+              <Box key={idx}>
+                <Text color={color}>
+                  {line.type === 'context' || line.type === 'add' || line.type === 'remove'
+                    ? `${prefix} ${line.content}`
+                    : line.content
+                  }
+                </Text>
+              </Box>
+            );
+          })}
+        </Box>
+
+        {showScrollBar && (
+          <ScrollBar position={scrollPosition} height={displayLines.length} />
+        )}
       </Box>
 
       <Box paddingX={1}>
         <Text dimColor>↑↓/jk=scroll  g/G=top/bottom  PgUp/PgDn  q=close</Text>
+        {showScrollBar && <Text dimColor>  mouse=scroll</Text>}
       </Box>
     </Box>
   );

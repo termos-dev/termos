@@ -1,7 +1,9 @@
-import { Box, Text, useInput, useApp, useStdout, useStdin } from 'ink';
-import { useState, useEffect, useCallback } from 'react';
+import { Box, Text, useInput, useApp } from 'ink';
+import { useState, useEffect } from 'react';
 import { readFileSync } from 'fs';
+import { spawn } from 'child_process';
 import * as path from 'path';
+import { useTerminalSize, ScrollBar, useMouseScroll } from './shared/index.js';
 
 declare const onComplete: (result: unknown) => void;
 declare const args: {
@@ -9,6 +11,7 @@ declare const args: {
   title?: string;
   highlight?: string; // "15-20" or "15"
   line?: string; // jump to line
+  editor?: string; // e.g. "code --goto", "vim +{line}", "nano"
 };
 
 // Simple syntax highlighting patterns
@@ -32,30 +35,6 @@ function getLanguage(filePath: string): string {
     '.md': 'markdown', '.yml': 'yaml', '.yaml': 'yaml', '.sh': 'bash',
   };
   return langMap[ext] || 'text';
-}
-
-// Scroll indicator bar component
-function ScrollBar({ position, height }: { position: number; height: number }) {
-  const trackHeight = Math.max(3, height);
-  const thumbSize = Math.max(1, Math.floor(trackHeight * 0.2));
-  const thumbPos = Math.floor(position * (trackHeight - thumbSize));
-
-  const chars: string[] = [];
-  for (let i = 0; i < trackHeight; i++) {
-    if (i >= thumbPos && i < thumbPos + thumbSize) {
-      chars.push('█');
-    } else {
-      chars.push('░');
-    }
-  }
-
-  return (
-    <Box flexDirection="column" marginLeft={1}>
-      {chars.map((char, i) => (
-        <Text key={i} color="gray">{char}</Text>
-      ))}
-    </Box>
-  );
 }
 
 function highlightLine(line: string, lang: string): React.ReactNode[] {
@@ -108,8 +87,7 @@ function highlightLine(line: string, lang: string): React.ReactNode[] {
 
 export default function CodeViewer() {
   const { exit } = useApp();
-  const { stdout } = useStdout();
-  const { stdin, setRawMode } = useStdin();
+  const { rows } = useTerminalSize();
 
   const filePath = args?.file;
   const title = args?.title || (filePath ? path.basename(filePath) : 'Code');
@@ -152,7 +130,7 @@ export default function CodeViewer() {
     }
   }, [filePath]);
 
-  const visibleLines = stdout?.rows ? Math.max(5, stdout.rows - 6) : 20;
+  const visibleLines = Math.max(5, rows - 6);
   const lang = filePath ? getLanguage(filePath) : 'text';
   const lineNumWidth = String(lines.length).length;
 
@@ -162,50 +140,7 @@ export default function CodeViewer() {
   }, [lines.length, visibleLines]);
 
   // Mouse scroll support
-  const handleScroll = useCallback((direction: 'up' | 'down') => {
-    setScroll(s => {
-      if (direction === 'up') return Math.max(0, s - 3);
-      return Math.min(maxScroll, s + 3);
-    });
-  }, [maxScroll]);
-
-  useEffect(() => {
-    if (!stdin || !setRawMode) return;
-
-    // Enable mouse tracking (SGR 1006 mode for better compatibility)
-    process.stdout.write('\x1b[?1000h'); // Enable mouse click tracking
-    process.stdout.write('\x1b[?1006h'); // Enable SGR extended mode
-
-    const handleData = (data: Buffer) => {
-      const str = data.toString();
-
-      // Parse SGR mouse sequences: \x1b[<button;x;y;M or m
-      // Button 64 = scroll up, 65 = scroll down
-      const sgrMatch = str.match(/\x1b\[<(\d+);(\d+);(\d+)([Mm])/);
-      if (sgrMatch) {
-        const button = parseInt(sgrMatch[1], 10);
-        if (button === 64) handleScroll('up');
-        else if (button === 65) handleScroll('down');
-        return;
-      }
-
-      // Parse legacy mouse sequences: \x1b[M followed by 3 bytes
-      if (str.startsWith('\x1b[M') && str.length >= 6) {
-        const button = str.charCodeAt(3) - 32;
-        if (button === 64) handleScroll('up');
-        else if (button === 65) handleScroll('down');
-      }
-    };
-
-    stdin.on('data', handleData);
-
-    return () => {
-      // Disable mouse tracking on cleanup
-      process.stdout.write('\x1b[?1006l');
-      process.stdout.write('\x1b[?1000l');
-      stdin.off('data', handleData);
-    };
-  }, [stdin, setRawMode, handleScroll]);
+  useMouseScroll({ scroll, maxScroll, setScroll });
 
   useInput((input, key) => {
     if (input === 'q' || key.escape) {
@@ -213,6 +148,43 @@ export default function CodeViewer() {
         action: 'accept',
         file: filePath,
         viewedLines: [scroll + 1, Math.min(scroll + visibleLines, lines.length)],
+      });
+      exit();
+      return;
+    }
+
+    // Edit in external editor
+    if (input === 'e' && args?.editor && filePath) {
+      const currentLine = scroll + 1;
+      // Replace {line} placeholder with actual line number
+      const editorCmd = args.editor.replace('{line}', String(currentLine));
+
+      // Build the full command with file:line for VS Code style, or file for others
+      let fullCmd: string;
+      if (editorCmd.includes('--goto')) {
+        // VS Code style: code --goto file:line
+        fullCmd = `${editorCmd} "${filePath}:${currentLine}"`;
+      } else if (editorCmd.includes('+')) {
+        // Already has line number from {line} placeholder (vim +{line})
+        fullCmd = `${editorCmd} "${filePath}"`;
+      } else {
+        // Generic: just open the file
+        fullCmd = `${editorCmd} "${filePath}"`;
+      }
+
+      // Launch the editor (detached so it survives after we exit)
+      const child = spawn(fullCmd, [], {
+        shell: true,
+        detached: true,
+        stdio: 'ignore',
+      });
+      child.unref();
+
+      onComplete({
+        action: 'edit',
+        file: filePath,
+        line: currentLine,
+        editor: fullCmd,
       });
       exit();
       return;
@@ -289,7 +261,8 @@ export default function CodeViewer() {
 
       <Box paddingX={1}>
         <Text dimColor>↑↓/jk=scroll  g/G=top/bottom  PgUp/PgDn  q=close</Text>
-        {showScrollBar && <Text dimColor>  🖱️=scroll</Text>}
+        {args?.editor && <Text dimColor>  e=edit</Text>}
+        {showScrollBar && <Text dimColor>  mouse=scroll</Text>}
       </Box>
     </Box>
   );

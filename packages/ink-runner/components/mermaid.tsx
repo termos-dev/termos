@@ -1,6 +1,7 @@
-import { Box, Text, useInput, useApp, useStdout } from 'ink';
+import { Box, Text, useInput, useApp } from 'ink';
 import { useState, useEffect } from 'react';
 import { readFileSync } from 'fs';
+import { useTerminalSize, ScrollBar, useMouseScroll } from './shared/index.js';
 
 declare const onComplete: (result: unknown) => void;
 declare const args: {
@@ -187,7 +188,7 @@ function renderFlowchartASCII(diagram: ParsedDiagram): string[] {
 
 export default function MermaidViewer() {
   const { exit } = useApp();
-  const { stdout } = useStdout();
+  const { rows } = useTerminalSize();
 
   const [diagram, setDiagram] = useState<ParsedDiagram | null>(null);
   const [scroll, setScroll] = useState(0);
@@ -195,7 +196,7 @@ export default function MermaidViewer() {
   const [viewMode, setViewMode] = useState<'ascii' | 'source'>('ascii');
 
   const title = args?.title || 'Mermaid Diagram';
-  const visibleLines = stdout?.rows ? Math.max(5, stdout.rows - 6) : 20;
+  const visibleLines = Math.max(5, rows - 6);
 
   useEffect(() => {
     try {
@@ -229,6 +230,10 @@ export default function MermaidViewer() {
     : [];
 
   const maxScroll = Math.max(0, lines.length - visibleLines);
+  const showScrollBar = lines.length > visibleLines;
+
+  // Mouse scroll support
+  useMouseScroll({ scroll, maxScroll, setScroll });
 
   useInput((input, key) => {
     if (input === 'q' || key.escape) {
@@ -266,6 +271,7 @@ export default function MermaidViewer() {
   }
 
   const displayLines = lines.slice(scroll, scroll + visibleLines);
+  const scrollPosition = maxScroll > 0 ? scroll / maxScroll : 0;
 
   return (
     <Box flexDirection="column">
@@ -273,35 +279,42 @@ export default function MermaidViewer() {
         <Text bold color="cyan">{title}</Text>
         <Text dimColor> [{diagram?.type || 'unknown'}]</Text>
         <Text dimColor> ({viewMode})</Text>
-        {lines.length > visibleLines && (
+        {showScrollBar && (
           <Text dimColor> ({scroll + 1}-{Math.min(scroll + visibleLines, lines.length)}/{lines.length})</Text>
         )}
       </Box>
 
-      <Box flexDirection="column" paddingX={1} marginTop={1}>
-        {displayLines.map((line, idx) => {
-          if (viewMode === 'source') {
-            // Syntax highlight source
-            let color: string | undefined;
-            if (line.startsWith('%%')) color = 'gray';
-            else if (line.match(/^(flowchart|graph|sequenceDiagram|classDiagram)/i)) color = 'magenta';
-            else if (line.includes('-->') || line.includes('---')) color = 'cyan';
-            else if (line.match(/^\w+\[/)) color = 'green';
+      <Box flexDirection="row">
+        <Box flexDirection="column" paddingX={1} marginTop={1} flexGrow={1}>
+          {displayLines.map((line, idx) => {
+            if (viewMode === 'source') {
+              // Syntax highlight source
+              let color: string | undefined;
+              if (line.startsWith('%%')) color = 'gray';
+              else if (line.match(/^(flowchart|graph|sequenceDiagram|classDiagram)/i)) color = 'magenta';
+              else if (line.includes('-->') || line.includes('---')) color = 'cyan';
+              else if (line.match(/^\w+\[/)) color = 'green';
 
-            return <Text key={idx} color={color}>{line}</Text>;
-          } else {
-            // ASCII rendering
-            let color: string | undefined;
-            if (line.startsWith('[') || line.startsWith('(') || line.startsWith('<')) color = 'green';
-            else if (line.includes('▼') || line.includes('│') || line.includes('┊')) color = 'cyan';
+              return <Text key={idx} color={color}>{line}</Text>;
+            } else {
+              // ASCII rendering
+              let color: string | undefined;
+              if (line.startsWith('[') || line.startsWith('(') || line.startsWith('<')) color = 'green';
+              else if (line.includes('\u25BC') || line.includes('\u2502') || line.includes('\u250A')) color = 'cyan';
 
-            return <Text key={idx} color={color}>{line}</Text>;
-          }
-        })}
+              return <Text key={idx} color={color}>{line}</Text>;
+            }
+          })}
+        </Box>
+
+        {showScrollBar && (
+          <ScrollBar position={scrollPosition} height={displayLines.length} />
+        )}
       </Box>
 
       <Box paddingX={1} marginTop={1}>
         <Text dimColor>v=toggle view  ↑↓/jk=scroll  q=close</Text>
+        {showScrollBar && <Text dimColor>  mouse=scroll</Text>}
       </Box>
     </Box>
   );
