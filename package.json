@@ -27,12 +27,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/buremba/claude-ide.git"
+    "url": "git+https://github.com/termos-dev/termos.git"
   },
-  "author": "buremba",
-  "homepage": "https://github.com/buremba/claude-ide#readme",
+  "author": "termos-dev",
+  "homepage": "https://github.com/termos-dev/termos#readme",
   "bugs": {
-    "url": "https://github.com/buremba/claude-ide/issues"
+    "url": "https://github.com/termos-dev/termos/issues"
   },
   "keywords": [
     "ide",

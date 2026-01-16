@@ -1,171 +1,89 @@
-# termos
+# Termos
 
-Interactive UI runner for Claude Code. Opens Ink-based components in Zellij floating panes and streams interaction results.
+Keep Claude Code interactive while it works.
+
+**[termos-dev.github.io/termos](https://termos-dev.github.io/termos/)**
+
+## Why Termos?
+
+When Claude Code runs autonomously, you lose visibility and control. Termos lets Claude ask questions mid-run, show evidence (diffs, plans, test output) before proceeding, and keep you in sync without interrupting its flow.
+
+- **Async questions** - Claude asks without blocking; you answer when ready
+- **Proof while it runs** - Plans, diffs, and tests appear as evidence before the next step
+- **Keep context** - Short check-ins prevent drift so you stay synced with the agent
 
 ## Installation
+
+### Claude Code
+
+```bash
+npm install -g @termosdev/cli
+claude plugins install termos
+```
+
+Then run `/termos:start` in Claude to start the session.
+
+### Codex
+
+**Repo-scoped (no install):** Add the skill to your repo:
+
+```bash
+mkdir -p .codex/skills
+git clone https://github.com/termos-dev/termos.git .codex/skills/termos
+```
+
+**GitHub install (skill installer):**
+
+```bash
+python3 ~/.codex/skills/.system/skill-installer/scripts/install-skill-from-github.py \
+  --repo termos-dev/termos \
+  --path skills/termos \
+  --ref main
+```
+
+Restart Codex after installing.
+
+### Alternative: Manual Setup
+
+If you prefer not to use the plugin system:
 
 ```bash
 npm install -g @termosdev/cli
 ```
 
-## Claude Install
-
-- Marketplace: install the Termos plugin from Claude's plugin marketplace (if published).
-- Local dev: run Claude with `--plugin-dir .claude-plugin` from this repo.
-
-## Codex Skill Install
-
-Use Codex's skill tools:
-
-- Repo‑scoped (no install): put the skill in `.codex/skills/termos` inside your repo.
-  ```bash
-  mkdir -p .codex/skills
-  ln -s ../../skills/termos .codex/skills/termos
-  ```
-- GitHub install (skill installer):
-  ```bash
-  python3 ~/.codex/skills/.system/skill-installer/scripts/install-skill-from-github.py \
-    --repo <owner>/<repo> \
-    --path skills/termos \
-    --ref main
-  ```
-
-Restart Codex after installing.
-
-## Requirements
-
-- Zellij is required on Linux/Windows. On macOS, Termos can run outside Zellij and will open
-  Ghostty if available; otherwise it opens macOS Terminal tabs for interactions.
-
-## Quick Start
-
-1. Start or attach to a Zellij session (recommended):
+Then in your terminal:
 
 ```bash
-zellij attach --create my-session
-```
-
-2. Start the Termos event stream (keep this running):
-
-```bash
+# Start the event stream (keep running)
 termos up
+
+# In another terminal, Claude can run interactions
+termos run confirm --prompt "Proceed with deployment?"
 ```
 
-`termos up` streams interaction results.
+## How It Works
 
-3. Run an interaction (in another pane/tab):
+1. You start a Termos session with `/termos:start` (or `termos up` manually)
+2. Claude triggers `termos run` to show interactive components (confirmations, checklists, diffs, etc.)
+3. Your replies wake Claude immediately if waiting, or get injected into context when the run finishes
 
-```bash
-termos run --title "Confirm" confirm --prompt "Proceed?"
-```
+## Built-in Components
 
-macOS mode (no Zellij):
+- `confirm` - Yes/no confirmations
+- `ask` - Text input questions
+- `checklist` - Multi-select options
+- `code` - Syntax-highlighted code blocks
+- `diff` - File diffs with syntax highlighting
+- `table` - Data tables
+- `markdown` - Rendered markdown
+- `mermaid` - Diagrams
+- `progress` - Progress indicators
+- `plan-viewer` - Implementation plans
+- `chart`, `gauge`, `json`, `select`, `tree` - And more
 
-```bash
-termos up
-termos run --title "Confirm" confirm --prompt "Proceed?"
-```
+## Custom Components
 
-If you run `termos up` and `termos run` from different directories, set a shared session name:
-
-```bash
-# Linux/Windows or cross-directory usage:
-TERMOS_SESSION_NAME=my-session termos up
-TERMOS_SESSION_NAME=my-session termos run --title "Confirm" confirm --prompt "Proceed?"
-```
-
-Note: On macOS, the session name is automatically generated from the directory name, so `--session` is only needed when running from different directories.
-
-## CLI Commands
-
-```bash
-termos up                        # Stream events for current session (long-running)
-termos run <component>           # Run a built-in or custom Ink component
-termos run --cmd "<command>"     # Run a shell command (recommended for agents)
-termos run --cmd-file <path>     # Run a shell command from file
-termos run -- <command>          # Run a shell command (passthrough)
-```
-
-Built-in components: `ask`, `confirm`, `checklist`, `code`, `diff`, `table`, `progress`, `mermaid`, `markdown`, `plan-viewer`, `chart`, `gauge`, `json`, `select`, `tree`.
-
-Run `termos run --help` for detailed schemas and options.
-
-## Position Presets
-
-Use `--position <preset>` to control where interactions appear:
-
-**Floating (overlay panes):**
-- `floating` - Top-right (default for components)
-- `floating:center` - Centered overlay
-- `floating:top-left`, `floating:top-right`
-- `floating:bottom-left`, `floating:bottom-right`
-
-**Split (Zellij only - integrated into layout):**
-- `split` - Auto-detect direction based on terminal size
-- `split:right` - Side-by-side split
-- `split:down` - Stacked split
-
-**Tab:**
-- `tab` - New tab (default for commands)
-
-Examples:
-```bash
-# Floating (default for components)
-termos run --title "Confirm" confirm --prompt "Proceed?"
-
-# Centered floating pane
-termos run --title "Question" --position floating:center ask --prompt "Name?"
-
-# Split pane (Zellij only)
-termos run --title "Review" --position split confirm --prompt "Approve changes?"
-
-# Tab (default for commands)
-termos run --title "Server" -- python3 -m http.server 8080
-```
-
-Note: Split positions only work in Zellij. On macOS without Zellij, split falls back to a new window.
-
-## Live Data
-
-Use `--watch-cmd` to display live-updating data in components like `gauge` and `chart`:
-
-```bash
-# Monitor line count
-termos run --title "Lines" gauge --watch-cmd "wc -l *.ts | awk '{print \$1}'" --max 10000
-
-# Track process count
-termos run --title "Procs" gauge --watch-cmd "ps aux | wc -l" --interval 2000
-
-# Live chart from JSON
-termos run --title "CPU" chart --watch-cmd "cat /tmp/metrics.json" --parse json
-```
-
-Options:
-- `--watch-cmd "<cmd>"` - Shell command to run periodically
-- `--interval <ms>` - Refresh interval in milliseconds (default: 1000)
-- `--parse <mode>` - Output parsing: `number`, `json`, `lines`, `raw`, `auto` (default: auto)
-
-## Interactive Forms
-
-Show forms to collect user input:
-
-```typescript
-show_user_interaction({
-  schema: {
-    questions: [
-      { question: "Project name?", header: "Name", inputType: "text" },
-      { question: "Language?", header: "Lang", options: [
-        { label: "TypeScript" },
-        { label: "Python" }
-      ]}
-    ]
-  }
-})
-```
-
-## Custom Ink Components
-
-Create `.tsx` files in `.termos/interactive/`:
+Create `.tsx` files in `.termos/interactive/` for custom Ink components:
 
 ```tsx
 import { Text, useInput, useApp } from 'ink';
@@ -177,11 +95,14 @@ export default function() {
   useInput((_, key) => {
     if (key.return) { onComplete({ done: true }); exit(); }
   });
-  return <Text>Press Enter</Text>;
+  return <Text>Press Enter to continue</Text>;
 }
 ```
 
-Run with: `show_user_interaction({ ink_file: "my-component.tsx" })`
+## Requirements
+
+- **macOS**: Works natively, opens Ghostty or Terminal for interactions
+- **Linux/Windows**: Requires [Zellij](https://zellij.dev/) for floating pane support
 
 ## License
 

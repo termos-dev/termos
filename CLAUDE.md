@@ -53,7 +53,7 @@ termos run confirm --prompt "Smoke test?"
 
 When testing from different directories, clear the plugin cache first:
 ```bash
-rm -rf ~/.claude/plugins/cache/claude-ide
+rm -rf ~/.claude/plugins/cache/termos
 ```
 
 Then test with Claude Code:

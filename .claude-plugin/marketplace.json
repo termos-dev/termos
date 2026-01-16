@@ -1,7 +1,7 @@
 {
   "name": "termos",
   "owner": {
-    "name": "buremba"
+    "name": "termos-dev"
   },
   "metadata": {
     "description": "Interactive UI runner for Claude Code",
@@ -14,7 +14,7 @@
       "description": "Interactive UI runner for Claude Code using Zellij floating panes.",
       "version": "0.1.0",
       "author": {
-        "name": "buremba"
+        "name": "termos-dev"
       }
     }
   ]

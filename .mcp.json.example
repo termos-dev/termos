@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "ide": {
-      "command": "npx",
-      "args": ["mcp-ide"]
-    }
-  }
-}

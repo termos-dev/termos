@@ -3,9 +3,9 @@
   "version": "0.2.0",
   "description": "Interactive UI runner for Claude Code using Zellij floating panes",
   "author": {
-    "name": "buremba"
+    "name": "termos-dev"
   },
-  "repository": "https://github.com/buremba/claude-ide",
+  "repository": "https://github.com/termos-dev/termos",
   "license": "MIT",
   "keywords": ["ide", "interactive", "terminal", "claude-code", "zellij", "tui"],
   "commands": "./.claude-plugin/commands/",
