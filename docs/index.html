@@ -142,8 +142,8 @@
         <!-- Demo Video -->
         <div class="mt-12 overflow-hidden rounded-2xl border border-white/10 bg-black/40 shadow-2xl">
           <div class="min-h-[320px] w-full">
-            <div id="demo-container" class="h-[320px] w-full flex items-center justify-center">
-              <div id="asciinema-demo"></div>
+            <div id="demo-container" class="h-[320px] w-full">
+              <div id="asciinema-demo" class="w-full h-full"></div>
             </div>
           </div>
         </div>
@@ -298,8 +298,8 @@
 
         <div class="mt-8 overflow-hidden rounded-2xl border border-white/10 bg-black/40 shadow-xl">
           <div class="min-h-[400px] w-full">
-            <div id="init-demo-container" class="h-[400px] w-full flex items-center justify-center">
-              <div id="asciinema-init"></div>
+            <div id="init-demo-container" class="h-[400px] w-full">
+              <div id="asciinema-init" class="w-full h-full"></div>
             </div>
           </div>
         </div>
@@ -495,7 +495,13 @@ claude plugins install termos</code></pre>
         AsciinemaPlayer.create(
           "recordings/peerbot-demo.cast",
           demoContainer,
-          { fit: "width", autoPlay: true, loop: true, speed: 1 }
+          {
+            fit: "width",
+            autoPlay: true,
+            loop: true,
+            speed: 1,
+            theme: "dracula"
+          }
         );
       }
 
@@ -505,7 +511,13 @@ claude plugins install termos</code></pre>
         AsciinemaPlayer.create(
           "recordings/init-demo.cast",
           initContainer,
-          { fit: "width", autoPlay: true, loop: true, speed: 1.2 }
+          {
+            fit: "width",
+            autoPlay: true,
+            loop: true,
+            speed: 1.2,
+            theme: "dracula"
+          }
         );
       }
     </script>

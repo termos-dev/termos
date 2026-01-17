@@ -1,0 +1,7 @@
+{"version":2,"width":80,"height":24,"timestamp":1768672456,"command":"/tmp/ink-demo.sh","env":{"SHELL":"/bin/zsh"}}
+[0.140556, "o", "\u001b[H\u001b[2J\u001b[3J"]
+[0.448312, "o", "\u001b[0;90m# Real termos components\u001b[0m\r\n\r\n"]
+[0.955494, "o", "$ termos run confirm --prompt \"Deploy?\"\r\n"]
+[1.99231, "o", "\r\n$ termos run progress --steps \"Build,Test,Deploy\"\r\n"]
+[2.46936, "o", "\r\n\u001b[32m✓ Real ink components!\u001b[0m\r\n"]
+[4.473614, "x", "0"]
