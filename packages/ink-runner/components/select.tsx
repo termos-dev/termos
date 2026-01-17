@@ -1,7 +1,7 @@
 import { Box, Text, useInput, useApp } from 'ink';
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useMemo } from 'react';
 import { readFileSync } from 'fs';
-import { useTerminalSize, ScrollBar, useMouseScroll } from './shared/index.js';
+import { useTerminalSize, ScrollBar, useMouseScroll, useFileWatch } from './shared/index.js';
 
 declare const onComplete: (result: unknown) => void;
 declare const args: {
@@ -73,7 +73,7 @@ export default function Select() {
   const placeholder = args?.placeholder || 'Type to search...';
   const visibleRows = Math.max(3, rows - 8);
 
-  useEffect(() => {
+  useFileWatch(args?.file, () => {
     try {
       let data: unknown;
 
@@ -100,10 +100,11 @@ export default function Select() {
       }
 
       setItems(normalized);
+      setError(null);
     } catch (e) {
       setError(`Error: ${e instanceof Error ? e.message : String(e)}`);
     }
-  }, []);
+  });
 
   const filteredItems = useMemo(() => {
     if (!searchQuery) return items;

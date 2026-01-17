@@ -1,7 +1,7 @@
 import { Box, Text, useInput, useApp } from 'ink';
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useMemo } from 'react';
 import { readFileSync } from 'fs';
-import { useTerminalSize, ScrollBar, useMouseScroll } from './shared/index.js';
+import { useTerminalSize, ScrollBar, useMouseScroll, useFileWatch } from './shared/index.js';
 
 declare const onComplete: (result: unknown) => void;
 declare const args: {
@@ -108,7 +108,7 @@ export default function JsonViewer() {
   const expandDepth = parseInt(args?.expandDepth || '2', 10);
   const visibleRows = Math.max(3, rows - 6);
 
-  useEffect(() => {
+  useFileWatch(args?.file, () => {
     try {
       let parsed: unknown;
 
@@ -123,6 +123,7 @@ export default function JsonViewer() {
       }
 
       setData(parsed);
+      setError(null);
 
       // Initialize expanded paths based on expandDepth
       const initialExpanded = new Set<string>();
@@ -141,7 +142,7 @@ export default function JsonViewer() {
     } catch (e) {
       setError(`Error: ${e instanceof Error ? e.message : String(e)}`);
     }
-  }, []);
+  });
 
   const flatNodes = useMemo(() => {
     if (data === null && !error) return [];

@@ -1,7 +1,7 @@
 import { Box, Text, useInput, useApp } from 'ink';
 import { useState } from 'react';
 import { readFileSync } from 'fs';
-import { useTerminalSize, ScrollBar, useMouseScroll } from './shared/index.js';
+import { useTerminalSize, ScrollBar, useMouseScroll, useFileWatch } from './shared/index.js';
 
 declare const onComplete: (result: unknown) => void;
 declare const args: { file?: string };
@@ -47,20 +47,23 @@ export default function PlanViewer() {
   const { exit } = useApp();
   const { rows } = useTerminalSize();
   const [scroll, setScroll] = useState(0);
+  const [lines, setLines] = useState<string[]>([]);
 
   const filePath = args?.file;
-  let content = 'No plan file specified';
-  let lines: string[] = [];
 
-  if (filePath) {
-    try {
-      content = readFileSync(filePath, 'utf-8');
-      lines = content.split('\n');
-    } catch (e) {
-      content = `Error reading file: ${filePath}`;
-      lines = [content];
+  useFileWatch(filePath, () => {
+    if (!filePath) {
+      setLines(['No plan file specified']);
+      return;
     }
-  }
+
+    try {
+      const content = readFileSync(filePath, 'utf-8');
+      setLines(content.split('\n'));
+    } catch (e) {
+      setLines([`Error reading file: ${filePath}`]);
+    }
+  });
 
   const visibleLines = Math.max(5, rows - 6);
   const maxScroll = Math.max(0, lines.length - visibleLines);

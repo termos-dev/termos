@@ -34,10 +34,9 @@ Run Termos **inside a Zellij session** on Linux/Windows:
 
 ```bash
 zellij attach --create termos-dev
-termos up
-termos run confirm --prompt "Smoke test?"
+termos run --title "Test" confirm --prompt "Smoke test?"
+termos wait <id>
 ```
-`termos up` streams events and should be kept running in a separate pane to receive interaction results.
 
 ## macOS Mode
 
@@ -45,8 +44,8 @@ On macOS you can run outside Zellij. Termos will open Ghostty if available,
 otherwise it opens a Terminal tab for interactions:
 
 ```bash
-termos up
-termos run confirm --prompt "Smoke test?"
+termos run --title "Test" confirm --prompt "Smoke test?"
+termos wait <id>
 ```
 
 ## Testing
@@ -64,11 +63,15 @@ cd /path/to/project
 
 ## Termos Interactive Components
 
-This project uses termos for interactive UI. **Run `termos up` first**, then read `termos.md` for preferences.
+This project uses termos for interactive UI. Read `termos.md` for interaction preferences.
+
+Workflow:
+1. `termos run ...` spawns pane, returns interaction ID
+2. `termos wait <id>` blocks until result (or run in background with `&`)
+3. `termos result` checks all results, or `termos result <id>` for specific one
 
 - **USE termos components** for confirmations, progress, and user engagement
 - **Show plan files** in a pane during plan mode (if enabled in termos.md)
 - **Display task progress** visually for multi-step operations
-- **Keep the user engaged** with periodic check-ins and status panes
 
 Run `termos --help` for available components. Always use `--title` and `--position` flags.

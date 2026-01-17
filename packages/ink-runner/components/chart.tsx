@@ -1,6 +1,7 @@
 import { Box, Text, useInput, useApp, useStdout } from 'ink';
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { readFileSync } from 'fs';
+import { useFileWatch } from './shared/index.js';
 
 /**
  * Calculate ideal height (in rows) based on component args
@@ -334,7 +335,7 @@ export default function Chart() {
   const termWidth = stdout?.columns || 80;
   const maxWidth = termWidth - 4;
 
-  useEffect(() => {
+  useFileWatch(args?.file, () => {
     try {
       let rawData: unknown;
 
@@ -349,10 +350,11 @@ export default function Chart() {
       }
 
       setData(rawData);
+      setError(null);
     } catch (e) {
       setError(`Error parsing data: ${e instanceof Error ? e.message : String(e)}`);
     }
-  }, []);
+  });
 
   useInput((input, key) => {
     if (input === 'q' || key.escape || key.return) {

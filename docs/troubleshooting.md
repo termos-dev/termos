@@ -7,29 +7,27 @@
 - Sessions: results are written to `~/.termos/sessions/<session>/events.jsonl`.
 - tmux is not supported.
 
-## Session confusion ("termos up shows nothing")
+## Session handling
 
-On macOS, the session name is auto-generated from the directory name, so `--session` is optional:
+Session names are auto-generated based on your environment:
 
-```bash
-# On macOS: session auto-generated from directory name
-termos up
-termos run --title "Confirm" confirm --prompt "Proceed?"
-```
-
-On Linux/Windows outside Zellij, you must use a shared session name:
-
-```bash
-termos up --session demo
-termos run --session demo --title "Confirm" confirm --prompt "Proceed?"
-```
-
-Or set `TERMOS_SESSION_NAME` for both commands.
-
-Inside Zellij, the session name is always `ZELLIJ_SESSION_NAME` and `--session` is ignored:
-
+**Inside Zellij:** Session name is always `ZELLIJ_SESSION_NAME`:
 ```bash
 echo $ZELLIJ_SESSION_NAME
+```
+
+**On macOS (outside Zellij):** Session is derived from the current directory path.
+
+**Workflow:**
+```bash
+# Run an interaction (returns JSON with ID)
+termos run --title "Confirm" confirm --prompt "Proceed?"
+
+# Wait for result (blocking)
+termos wait <id>
+
+# Or check all results (non-blocking)
+termos result
 ```
 
 ## Floating pane opens then closes
@@ -82,7 +80,7 @@ If it stays empty after you answer, the pane didn’t write results (see PATH no
 printf '{"ts":%s,"type":"result","id":"test","action":"accept"}\n' "$(date +%s000)" >> ~/.termos/sessions/<session>/events.jsonl
 ```
 
-If `termos up` is attached to the right session, it should print the line immediately.
+You should see the line when running `termos result` or by tailing the events file.
 
 ## Confirm you are using the local build
 

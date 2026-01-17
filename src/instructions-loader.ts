@@ -51,3 +51,52 @@ export function loadMergedInstructions(cwd: string): string {
 
   return parts.join("\n\n");
 }
+
+// TUI Editor configuration for embedded in-pane editing
+export interface TuiEditorConfig {
+  editor: string;
+  command: string;
+  lineFormat: string;
+}
+
+// Parse simple YAML-like config from termos.md
+function parseSimpleYaml(yaml: string): TuiEditorConfig | null {
+  const lines = yaml.trim().split("\n");
+  const config: Partial<TuiEditorConfig> = {};
+
+  for (const line of lines) {
+    const match = line.match(/^(\w+):\s*"?([^"]+)"?$/);
+    if (match) {
+      const [, key, value] = match;
+      if (key === "editor") config.editor = value;
+      else if (key === "command") config.command = value;
+      else if (key === "lineFormat") config.lineFormat = value;
+    }
+  }
+
+  if (config.editor && config.command && config.lineFormat) {
+    return config as TuiEditorConfig;
+  }
+  return null;
+}
+
+// Load TUI editor config from termos.md
+export function loadTuiEditorConfig(cwd: string): TuiEditorConfig | null {
+  // Check project-level first, then user-level
+  const projectInstructions = loadProjectInstructions(cwd);
+  const userInstructions = loadUserInstructions();
+
+  // Try project config first
+  for (const instructions of [projectInstructions, userInstructions]) {
+    if (!instructions) continue;
+
+    // Look for TUI Editor YAML block
+    const yamlMatch = instructions.match(/## TUI Editor\n```yaml\n([\s\S]*?)```/);
+    if (yamlMatch) {
+      const config = parseSimpleYaml(yamlMatch[1]);
+      if (config) return config;
+    }
+  }
+
+  return null;
+}

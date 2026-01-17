@@ -1,7 +1,7 @@
 import { Box, Text, useInput, useApp } from 'ink';
 import { useState, useEffect } from 'react';
-import { readFileSync, watchFile, unwatchFile } from 'fs';
-import { useTerminalSize, ScrollBar, useMouseScroll } from './shared/index.js';
+import { readFileSync } from 'fs';
+import { useTerminalSize, ScrollBar, useMouseScroll, useFileWatch } from './shared/index.js';
 
 declare const onComplete: (result: unknown) => void;
 declare const args: { file?: string; content?: string; title?: string };
@@ -46,14 +46,17 @@ export default function MarkdownViewer() {
   const inlineContent = args?.content;
   const title = args?.title || 'Markdown';
 
-  // Load content from inline or file
+  // Handle inline content (no file watching needed)
   useEffect(() => {
-    // Priority: inline content > file
     if (inlineContent) {
       setContent(inlineContent);
       setLines(inlineContent.split('\n'));
-      return;
     }
+  }, [inlineContent]);
+
+  // Handle file content with watching
+  useFileWatch(!inlineContent ? filePath : undefined, () => {
+    if (inlineContent) return; // Skip if using inline content
 
     if (!filePath) {
       setContent('No content specified');
@@ -61,22 +64,15 @@ export default function MarkdownViewer() {
       return;
     }
 
-    const loadFile = () => {
-      try {
-        const text = readFileSync(filePath, 'utf-8');
-        setContent(text);
-        setLines(text.split('\n'));
-      } catch (e) {
-        setContent(`Error: ${filePath}`);
-        setLines([`Error reading: ${filePath}`]);
-      }
-    };
-
-    loadFile();
-    watchFile(filePath, { interval: 1000 }, loadFile);
-
-    return () => unwatchFile(filePath);
-  }, [filePath, inlineContent]);
+    try {
+      const text = readFileSync(filePath, 'utf-8');
+      setContent(text);
+      setLines(text.split('\n'));
+    } catch (e) {
+      setContent(`Error: ${filePath}`);
+      setLines([`Error reading: ${filePath}`]);
+    }
+  });
 
   const visibleLines = Math.max(5, rows - 4);
   const maxScroll = Math.max(0, lines.length - visibleLines);

@@ -1,6 +1,7 @@
 import { Box, Text, useInput, useApp } from 'ink';
 import { useState, useEffect } from 'react';
-import { watchFile, unwatchFile, readFileSync, existsSync } from 'fs';
+import { readFileSync, existsSync } from 'fs';
+import { useFileWatch } from './shared/index.js';
 
 declare const onComplete: (result: unknown) => void;
 declare const args: {
@@ -47,49 +48,44 @@ export default function Progress() {
   }, []);
 
   // Watch state file for updates
-  useEffect(() => {
-    if (!args?.stateFile || !existsSync(args.stateFile)) return;
+  const stateFile = args?.stateFile && existsSync(args.stateFile) ? args.stateFile : undefined;
+  useFileWatch(stateFile, () => {
+    if (!args?.stateFile) return;
 
-    const loadState = () => {
-      try {
-        const content = readFileSync(args.stateFile!, 'utf-8');
-        const state = JSON.parse(content);
+    try {
+      const content = readFileSync(args.stateFile, 'utf-8');
+      const state = JSON.parse(content);
 
-        if (state.step !== undefined) {
-          setSteps(prev => prev.map((s, i) => ({
-            ...s,
-            status: i < state.step - 1 ? 'done' : i === state.step - 1 ? 'running' : 'pending',
-          })));
-        }
-        if (state.status) {
-          setCurrentMessage(state.status);
-        }
-        if (state.done) {
-          setSteps(prev => prev.map(s => ({ ...s, status: 'done' })));
-          onComplete({
-            action: 'accept',
-            completed: stepNames,
-            current: null,
-          });
-          exit();
-        }
-        if (state.error) {
-          const errorStep = state.step ? state.step - 1 : steps.findIndex(s => s.status === 'running');
-          setSteps(prev => prev.map((s, i) => ({
-            ...s,
-            status: i === errorStep ? 'error' : s.status,
-          })));
-          setCurrentMessage(state.error);
-        }
-      } catch {
-        // Ignore parse errors
+      if (state.step !== undefined) {
+        setSteps(prev => prev.map((s, i) => ({
+          ...s,
+          status: i < state.step - 1 ? 'done' : i === state.step - 1 ? 'running' : 'pending',
+        })));
       }
-    };
-
-    loadState();
-    watchFile(args.stateFile, { interval: 500 }, loadState);
-    return () => unwatchFile(args.stateFile!);
-  }, [args?.stateFile]);
+      if (state.status) {
+        setCurrentMessage(state.status);
+      }
+      if (state.done) {
+        setSteps(prev => prev.map(s => ({ ...s, status: 'done' })));
+        onComplete({
+          action: 'accept',
+          completed: stepNames,
+          current: null,
+        });
+        exit();
+      }
+      if (state.error) {
+        const errorStep = state.step ? state.step - 1 : steps.findIndex(s => s.status === 'running');
+        setSteps(prev => prev.map((s, i) => ({
+          ...s,
+          status: i === errorStep ? 'error' : s.status,
+        })));
+        setCurrentMessage(state.error);
+      }
+    } catch {
+      // Ignore parse errors
+    }
+  }, { interval: 500 });
 
   useInput((input, key) => {
     if (input === 'q' || key.escape) {

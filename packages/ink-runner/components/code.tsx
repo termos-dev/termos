@@ -1,9 +1,9 @@
 import { Box, Text, useInput, useApp } from 'ink';
-import { useState, useEffect } from 'react';
-import { readFileSync } from 'fs';
+import { useState, useEffect, useRef } from 'react';
+import { readFileSync, writeFileSync } from 'fs';
 import { spawn } from 'child_process';
 import * as path from 'path';
-import { useTerminalSize, ScrollBar, useMouseScroll } from './shared/index.js';
+import { useTerminalSize, ScrollBar, useMouseScroll, useFileWatch } from './shared/index.js';
 
 declare const onComplete: (result: unknown) => void;
 declare const args: {
@@ -11,7 +11,9 @@ declare const args: {
   title?: string;
   highlight?: string; // "15-20" or "15"
   line?: string; // jump to line
-  editor?: string; // e.g. "code --goto", "vim +{line}", "nano"
+  editor?: string; // e.g. "code --goto", "vim +{line}", "nano" (external/detached mode)
+  embeddedEditor?: string; // TUI editor command for in-pane editing, e.g. "nvim +{line}", "hx {file}:{line}"
+  actionFile?: string; // temp file path for action (used in embedded mode)
 };
 
 // Simple syntax highlighting patterns
@@ -107,7 +109,10 @@ export default function CodeViewer() {
     ? parseInt(highlightRange.split('-')[1] || highlightRange.split('-')[0], 10)
     : highlightStart;
 
-  useEffect(() => {
+  const visibleLines = Math.max(5, rows - 6);
+  const isFirstLoad = useRef(true);
+
+  useFileWatch(filePath, () => {
     if (!filePath) {
       setError('No file specified. Use --file <path>');
       return;
@@ -116,21 +121,23 @@ export default function CodeViewer() {
     try {
       const content = readFileSync(filePath, 'utf-8');
       setLines(content.split('\n'));
+      setError(null);
 
-      // Jump to line if specified
-      if (jumpLine && jumpLine > 0) {
-        const targetScroll = Math.max(0, jumpLine - Math.floor(visibleLines / 2));
-        setScroll(targetScroll);
-      } else if (highlightStart) {
-        const targetScroll = Math.max(0, highlightStart - 3);
-        setScroll(targetScroll);
+      // Jump to line only on first load
+      if (isFirstLoad.current) {
+        isFirstLoad.current = false;
+        if (jumpLine && jumpLine > 0) {
+          const targetScroll = Math.max(0, jumpLine - Math.floor(visibleLines / 2));
+          setScroll(targetScroll);
+        } else if (highlightStart) {
+          const targetScroll = Math.max(0, highlightStart - 3);
+          setScroll(targetScroll);
+        }
       }
     } catch (e) {
       setError(`Error reading file: ${filePath}`);
     }
-  }, [filePath]);
-
-  const visibleLines = Math.max(5, rows - 6);
+  });
   const lang = filePath ? getLanguage(filePath) : 'text';
   const lineNumWidth = String(lines.length).length;
 
@@ -144,50 +151,73 @@ export default function CodeViewer() {
 
   useInput((input, key) => {
     if (input === 'q' || key.escape) {
-      onComplete({
+      const result = {
         action: 'accept',
         file: filePath,
         viewedLines: [scroll + 1, Math.min(scroll + visibleLines, lines.length)],
-      });
+      };
+      // In embedded mode, write action to file so shell wrapper knows to exit
+      if (args?.embeddedEditor && args?.actionFile) {
+        writeFileSync(args.actionFile, JSON.stringify(result));
+      }
+      onComplete(result);
       exit();
       return;
     }
 
-    // Edit in external editor
-    if (input === 'e' && args?.editor && filePath) {
+    // Edit - embedded mode or external editor
+    if (input === 'e' && filePath) {
       const currentLine = scroll + 1;
-      // Replace {line} placeholder with actual line number
-      const editorCmd = args.editor.replace('{line}', String(currentLine));
 
-      // Build the full command with file:line for VS Code style, or file for others
-      let fullCmd: string;
-      if (editorCmd.includes('--goto')) {
-        // VS Code style: code --goto file:line
-        fullCmd = `${editorCmd} "${filePath}:${currentLine}"`;
-      } else if (editorCmd.includes('+')) {
-        // Already has line number from {line} placeholder (vim +{line})
-        fullCmd = `${editorCmd} "${filePath}"`;
-      } else {
-        // Generic: just open the file
-        fullCmd = `${editorCmd} "${filePath}"`;
+      // Embedded mode: write action to temp file, let shell wrapper handle editor
+      if (args?.embeddedEditor && args?.actionFile) {
+        const actionData = {
+          action: 'edit',
+          file: filePath,
+          line: currentLine,
+          editorCmd: args.embeddedEditor, // pass the editor command to shell wrapper
+        };
+        writeFileSync(args.actionFile, JSON.stringify(actionData));
+        onComplete(actionData);
+        exit();
+        return;
       }
 
-      // Launch the editor (detached so it survives after we exit)
-      const child = spawn(fullCmd, [], {
-        shell: true,
-        detached: true,
-        stdio: 'ignore',
-      });
-      child.unref();
+      // External editor mode (detached process)
+      if (args?.editor) {
+        // Replace {line} placeholder with actual line number
+        const editorCmd = args.editor.replace('{line}', String(currentLine));
 
-      onComplete({
-        action: 'edit',
-        file: filePath,
-        line: currentLine,
-        editor: fullCmd,
-      });
-      exit();
-      return;
+        // Build the full command with file:line for VS Code style, or file for others
+        let fullCmd: string;
+        if (editorCmd.includes('--goto')) {
+          // VS Code style: code --goto file:line
+          fullCmd = `${editorCmd} "${filePath}:${currentLine}"`;
+        } else if (editorCmd.includes('+')) {
+          // Already has line number from {line} placeholder (vim +{line})
+          fullCmd = `${editorCmd} "${filePath}"`;
+        } else {
+          // Generic: just open the file
+          fullCmd = `${editorCmd} "${filePath}"`;
+        }
+
+        // Launch the editor (detached so it survives after we exit)
+        const child = spawn(fullCmd, [], {
+          shell: true,
+          detached: true,
+          stdio: 'ignore',
+        });
+        child.unref();
+
+        onComplete({
+          action: 'edit',
+          file: filePath,
+          line: currentLine,
+          editor: fullCmd,
+        });
+        exit();
+        return;
+      }
     }
 
     if (key.upArrow || input === 'k') {
@@ -261,7 +291,7 @@ export default function CodeViewer() {
 
       <Box paddingX={1}>
         <Text dimColor>↑↓/jk=scroll  g/G=top/bottom  PgUp/PgDn  q=close</Text>
-        {args?.editor && <Text dimColor>  e=edit</Text>}
+        {(args?.editor || args?.embeddedEditor) && <Text dimColor>  e=edit</Text>}
         {showScrollBar && <Text dimColor>  mouse=scroll</Text>}
       </Box>
     </Box>

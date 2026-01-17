@@ -31,6 +31,37 @@ function scheduleScriptCleanup(scriptPath: string, delayMs: number = 10000): voi
   }, delayMs);
 }
 
+/**
+ * Write a KDL layout file for creating a tab with a command.
+ * This ensures atomic tab creation - the command runs in the new tab only,
+ * avoiding race conditions that could affect other panes (like Claude's).
+ * Includes tab-bar and status-bar to match Zellij's default layout.
+ */
+function writeTempLayout(shellCommand: string, cwd?: string): string {
+  const tempFile = path.join(os.tmpdir(), `termos-layout-${Date.now()}.kdl`);
+  const shell = process.env.SHELL || "/bin/sh";
+
+  // Escape double quotes and backslashes for KDL string
+  const escapedCommand = shellCommand.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  const cwdLine = cwd ? `        cwd "${cwd}"\n` : "";
+
+  // Include tab-bar and status-bar to match Zellij's default layout
+  const layoutContent = `layout {
+    pane size=1 borderless=true {
+        plugin location="zellij:tab-bar"
+    }
+    pane command="${shell}" {
+        args "-c" "${escapedCommand}"
+${cwdLine}    }
+    pane size=1 borderless=true {
+        plugin location="zellij:status-bar"
+    }
+}`;
+
+  fs.writeFileSync(tempFile, layoutContent, { mode: 0o644 });
+  return tempFile;
+}
+
 interface FloatingPaneOptions {
   name?: string;
   width?: string;
@@ -83,25 +114,17 @@ export async function runTab(
   const execEnv = sessionName ? { ...process.env, ZELLIJ_SESSION_NAME: sessionName } : undefined;
   const execOptions = execEnv ? { env: execEnv } : undefined;
 
-  const tabArgs = ["action", "new-tab", "--name", name];
-  if (options.cwd) tabArgs.push("--cwd", options.cwd);
+  // Create a KDL layout file with the command - this is atomic and safe.
+  // Unlike the previous --in-place approach, this cannot affect other panes
+  // even if focus is not on the expected tab.
+  const layoutPath = writeTempLayout(shellCommand, options.cwd);
+
+  // Atomic operation: create tab with layout (command runs immediately in new tab)
+  const tabArgs = ["action", "new-tab", "--layout", layoutPath, "--name", name];
   await execFileAsync("zellij", tabArgs, execOptions);
-  try {
-    await execFileAsync("zellij", ["action", "go-to-tab-name", name], execOptions);
-  } catch {
-    // ignore focus failures; run will still work in most cases
-  }
 
-  // Write to temp script and execute directly to ensure proper TTY/raw mode for Ink
-  const scriptPath = writeTempScript(shellCommand);
-  const runArgs = ["run", "--in-place", "--name", name];
-  if (options.cwd) runArgs.push("--cwd", options.cwd);
-  runArgs.push("--", scriptPath);
-
-  await execFileAsync("zellij", runArgs, execOptions);
-
-  // Schedule cleanup after the script has had time to start
-  scheduleScriptCleanup(scriptPath);
+  // Schedule cleanup after the layout file has been read
+  scheduleScriptCleanup(layoutPath);
 }
 
 interface SplitPaneOptions {

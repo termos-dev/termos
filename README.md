@@ -21,7 +21,7 @@ npm install -g @termosdev/cli
 claude plugins install termos
 ```
 
-Then run `/termos:start` in Claude to start the session.
+Then run `/termos:init` in Claude to configure your preferences.
 
 ### Codex
 
@@ -54,18 +54,21 @@ npm install -g @termosdev/cli
 Then in your terminal:
 
 ```bash
-# Start the event stream (keep running)
-termos up
+# Run an interaction (returns an ID)
+termos run --title "Deploy" confirm --prompt "Proceed with deployment?"
 
-# In another terminal, Claude can run interactions
-termos run confirm --prompt "Proceed with deployment?"
+# Wait for the result (blocking)
+termos wait <id>
+
+# Or check results non-blocking
+termos result
 ```
 
 ## How It Works
 
-1. You start a Termos session with `/termos:start` (or `termos up` manually)
-2. Claude triggers `termos run` to show interactive components (confirmations, checklists, diffs, etc.)
-3. Your replies wake Claude immediately if waiting, or get injected into context when the run finishes
+1. Claude triggers `termos run` to show interactive components (confirmations, checklists, diffs, etc.)
+2. Each interaction returns an ID that can be used to wait for or query results
+3. Your replies are captured and returned when you interact with the pane
 
 ## Built-in Components
 

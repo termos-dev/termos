@@ -78,23 +78,41 @@ export const componentSchemas: Record<string, ComponentSchema> = {
 
   code: {
     name: "code",
-    description: "Syntax-highlighted code viewer",
+    description: "Syntax-highlighted code viewer with embedded editing",
     args: {
       file: { type: "string", required: true, description: "Path to source file" },
       highlight: { type: "string", description: "Line range to highlight (e.g. '10-20')" },
       line: { type: "number", description: "Scroll to line number" },
-      editor: { type: "string", description: "Editor command with {line} placeholder (e.g. 'code --goto', 'vim +{line}')" },
+      editor: { type: "string", description: "External editor command (e.g. 'code --goto', 'vim +{line}')" },
+      embeddedEditor: { type: "string", description: "TUI editor command for in-pane editing (e.g. 'nvim +{line}', 'hx {file}:{line}')" },
     },
     returns: {
       action: "accept | edit",
       file: "string - path to file",
       line: "number - current line (when action=edit)",
-      editor: "string - editor command (when action=edit)",
     },
     examples: [
       'termos run --title "Code" code --file src/index.ts',
       'termos run --title "Code" code --file src/app.tsx --highlight "15-25" --line 15',
-      'termos run --title "Code" code --file src/index.ts --editor "code --goto"',
+      'termos run --title "Code" code --file src/index.ts --embeddedEditor "nvim +{line}"',
+    ],
+  },
+
+  edit: {
+    name: "edit",
+    description: "Open file in TUI editor (embedded in pane)",
+    args: {
+      file: { type: "string", required: true, description: "Path to file to edit" },
+      line: { type: "number", description: "Line number to jump to" },
+      editor: { type: "string", required: true, description: "TUI editor command (e.g. 'nvim +{line}', 'hx {file}:{line}', 'vim +{line}')" },
+    },
+    returns: {
+      action: "accept",
+      file: "string - path to file",
+    },
+    examples: [
+      'termos run --title "Edit" edit --file src/index.ts --editor "nvim +{line}"',
+      'termos run --title "Edit" edit --file src/app.tsx --line 42 --editor "vim +{line}"',
     ],
   },
 
@@ -151,17 +169,22 @@ export const componentSchemas: Record<string, ComponentSchema> = {
 
   mermaid: {
     name: "mermaid",
-    description: "Render Mermaid diagrams",
+    description: "Render Mermaid diagrams as ASCII flowcharts",
     args: {
       file: { type: "string", description: "Path to .mmd file" },
       code: { type: "string", description: "Inline mermaid code" },
+      title: { type: "string", description: "Title above diagram" },
+      editor: { type: "string", description: "Editor command to open file (e.g. 'code', 'vim')" },
     },
     returns: {
-      action: "accept",
+      action: "accept | edit",
+      file: "string - path to file (when action=edit)",
+      editor: "string - editor command (when action=edit)",
     },
     examples: [
       'termos run --title "Mermaid" mermaid --file diagram.mmd',
       'termos run --title "Mermaid" mermaid --code "flowchart LR; A-->B-->C"',
+      'termos run --title "Mermaid" mermaid --file diagram.mmd --editor "code"',
     ],
   },
 

@@ -5,40 +5,13 @@ import * as os from "os";
 import * as path from "path";
 import { fileURLToPath } from "url";
 import { InteractionManager, type InteractionResult } from "./interaction-manager.js";
-import { ensureEventsFile, getSessionRuntimeDir, getRuntimeRoot } from "./runtime.js";
+import { ensureEventsFile, getEventsFilePath } from "./runtime.js";
 import { selectPaneHost, VALID_POSITIONS, type PositionPreset } from "./pane-hosts.js";
 import { generateFullHelp, componentSchemas, normalizeFormSchema, type FormSchema } from "@termosdev/shared";
 import { startCommandWatcher, type ParseMode } from "./command-watcher.js";
 import { getComponentHeight, rowsToPercent } from "./height-calculator.js";
 import { loadMergedInstructions } from "./instructions-loader.js";
 import { extractFlags } from "./arg-parser.js";
-
-/**
- * Get list of available session names (directories in ~/.termos/sessions/)
- */
-function getAvailableSessions(): string[] {
-  const sessionsDir = getRuntimeRoot();
-  try {
-    return fs.readdirSync(sessionsDir).filter(name => {
-      const sessionPath = path.join(sessionsDir, name);
-      return fs.statSync(sessionPath).isDirectory();
-    });
-  } catch {
-    return [];
-  }
-}
-
-/**
- * Check if a session exists. Returns true if session directory exists.
- */
-function sessionExists(sessionName: string): boolean {
-  const sessionDir = getSessionRuntimeDir(sessionName);
-  try {
-    return fs.statSync(sessionDir).isDirectory();
-  } catch {
-    return false;
-  }
-}
 
 function showRunHelp(): void {
   console.log(generateFullHelp());
@@ -49,15 +22,15 @@ function showHelp(): void {
 termos - Interactive UI runner for Claude Code (Zellij, Ghostty, or macOS Terminal)
 
 Usage:
-  termos up                                        Start session and stream events
-                                                   Creates session directory; must be running to receive results.
-
   termos run --title <text> <component>            Run an Ink component (built-in or custom .tsx)
   termos run --title <text> --cmd "<command>"      Run a shell command (recommended for agents)
   termos run --title <text> --cmd-file <path>      Run a shell command from file
   termos run --title <text> -- <command>           Run a shell command (passthrough)
 
-Built-in components: ask, confirm, checklist, code, diff, table, progress, mermaid, markdown,
+  termos wait <id> [--timeout <seconds>]           Wait for interaction result (default: 300s)
+  termos result [<id>]                             Get result(s) - all if no ID provided
+
+Built-in components: ask, confirm, checklist, code, edit, diff, table, progress, mermaid, markdown,
                      plan-viewer, chart, select, tree, json, gauge
 
 Options:
@@ -77,14 +50,14 @@ Live Data Options:
 
   -h, --help            Show this help
 
-Session Lifecycle:
-  Run 'termos up' in your project directory to create a session.
-  Session name is derived from the full path (e.g., /Users/foo/project → -Users-foo-project).
-  In Zellij, the session name is the Zellij session name.
+Workflow:
+  1. termos run ... → Returns {"id": "...", "status": "started"}
+  2. User interacts with pane
+  3. termos wait <id> → Returns result when complete
 
 Examples:
-  termos run --title "Lines" gauge --watch-cmd "wc -l *.ts | awk '{print \\$1}'" --max 10000
-  termos run --title "Procs" gauge --watch-cmd "ps aux | wc -l" --interval 2000
+  termos run --title "Confirm" --position floating confirm --prompt "Delete files?"
+  termos wait interaction-1-123456789 --timeout 60
 `);
 
   const instructions = loadMergedInstructions(process.cwd());
@@ -92,64 +65,6 @@ Examples:
     console.log("\n## Project Instructions\n");
     console.log(instructions);
   }
-}
-
-async function handleUp(): Promise<void> {
-  const host = selectPaneHost(process.cwd());
-  const eventsFile = ensureEventsFile(host.sessionName);
-
-  console.log("Termos up is running.");
-  console.log(`Session: ${host.sessionName}`);
-  console.log("Streaming events...\n");
-
-  let buffer = "";
-  let offset = 0;
-  try {
-    offset = fs.statSync(eventsFile).size;
-  } catch {
-    offset = 0;
-  }
-
-  const readNew = () => {
-    let stats: fs.Stats;
-    try {
-      stats = fs.statSync(eventsFile);
-    } catch {
-      return;
-    }
-    if (stats.size < offset) {
-      offset = 0;
-    }
-    if (stats.size === offset) {
-      return;
-    }
-    const length = stats.size - offset;
-    if (length <= 0) {
-      return;
-    }
-    const buf = Buffer.alloc(length);
-    try {
-      const fd = fs.openSync(eventsFile, "r");
-      const bytesRead = fs.readSync(fd, buf, 0, length, offset);
-      fs.closeSync(fd);
-      if (bytesRead <= 0) return;
-      offset += bytesRead;
-      buffer += buf.toString("utf8", 0, bytesRead);
-    } catch {
-      return;
-    }
-
-    const lines = buffer.split("\n");
-    buffer = lines.pop() ?? "";
-    for (const line of lines) {
-      if (line.trim().length > 0) {
-        process.stdout.write(`${line}\n`);
-      }
-    }
-  };
-
-  // Poll for new events; keeps the process alive as a background service.
-  setInterval(readNew, 200);
 }
 
 async function handleRun(args: string[]): Promise<void> {
@@ -284,18 +199,8 @@ async function handleRun(args: string[]): Promise<void> {
 
   const host = selectPaneHost(process.cwd());
 
-  // Check if session exists (created by `termos up`)
-  if (!sessionExists(host.sessionName)) {
-    const available = getAvailableSessions();
-    let errorMsg = `Session '${host.sessionName}' not found.\n\n`;
-    errorMsg += `Run 'termos up' in this directory first to create a session.\n`;
-    errorMsg += `\nTip: Stay in the project root directory for all termos commands.`;
-    if (available.length > 0) {
-      errorMsg += `\n\nAvailable sessions:\n${available.map(s => `  - ${s}`).join("\n")}`;
-    }
-    emitRunError(errorMsg);
-    process.exit(1);
-  }
+  // Ensure session directory exists (no longer requires `termos up`)
+  ensureEventsFile(host.sessionName);
 
   let inkFile: string | undefined;
   let inkArgs: Record<string, string> | undefined;
@@ -395,6 +300,65 @@ async function handleRun(args: string[]): Promise<void> {
       timeoutMs: wait ? 300000 : 0,
       position: position,
       component: "ask",
+    });
+
+    if (wait) {
+      const result = await new Promise<InteractionResult>(resolve => {
+        im.on("interactionComplete", (iid: string, r: InteractionResult) => { if (iid === id) resolve(r); });
+      });
+      console.log(JSON.stringify(result));
+    } else {
+      console.log(JSON.stringify({ id, status: "started" }));
+    }
+    process.exit(0);
+  }
+
+  // Special handling for `edit` - runs TUI editor directly in pane
+  if (component === "edit") {
+    // Parse edit args
+    const editArgs: Record<string, string> = {};
+    for (let i = 1; i < restArgs.length; i++) {
+      const arg = restArgs[i];
+      if (arg.startsWith("--")) {
+        const key = arg.slice(2);
+        const eqIdx = key.indexOf("=");
+        if (eqIdx > 0) editArgs[key.slice(0, eqIdx)] = key.slice(eqIdx + 1);
+        else if (restArgs[i + 1]?.charAt(0) !== "-") editArgs[key] = restArgs[++i];
+      }
+    }
+
+    const filePath = editArgs["file"];
+    if (!filePath) {
+      emitRunError("--file is required for edit component");
+      process.exit(1);
+    }
+
+    const editorTemplate = editArgs["editor"];
+    if (!editorTemplate) {
+      emitRunError("--editor is required for edit component (e.g. 'nvim +{line}', 'vim +{line}')");
+      process.exit(1);
+    }
+
+    const lineNum = editArgs["line"] || "1";
+
+    // Replace {line} and {file} placeholders
+    let editorCmd = editorTemplate.replace("{line}", lineNum).replace("{file}", filePath);
+
+    // If command doesn't contain the file path, append it
+    if (!editorCmd.includes(filePath)) {
+      editorCmd = `${editorCmd} "${filePath}"`;
+    }
+
+    // Run as command mode
+    ensureEventsFile(host.sessionName);
+    const im = new InteractionManager({ cwd: process.cwd(), host });
+    const id = await im.create({
+      command: editorCmd,
+      title: titleValue,
+      timeoutMs: wait ? 300000 : 0,
+      position: position,
+      component: "edit",
+      isCommand: true,
     });
 
     if (wait) {
@@ -571,6 +535,122 @@ async function handleRun(args: string[]): Promise<void> {
   }
 }
 
+/**
+ * Wait for an interaction result (blocking)
+ */
+async function handleWait(args: string[]): Promise<void> {
+  const id = args[0];
+  if (!id) {
+    console.error("Usage: termos wait <interaction-id> [--timeout <seconds>]");
+    process.exit(1);
+  }
+
+  // Parse timeout (default 300 seconds = 5 minutes)
+  let timeoutSec = 300;
+  const timeoutIdx = args.indexOf("--timeout");
+  if (timeoutIdx !== -1 && args[timeoutIdx + 1]) {
+    timeoutSec = parseInt(args[timeoutIdx + 1], 10);
+    if (isNaN(timeoutSec) || timeoutSec <= 0) {
+      console.error("Invalid timeout value");
+      process.exit(1);
+    }
+  }
+
+  const host = selectPaneHost(process.cwd());
+  const eventsFile = getEventsFilePath(host.sessionName);
+  const startTime = Date.now();
+  const timeoutMs = timeoutSec * 1000;
+  const pollInterval = 500;
+
+  // Poll for result
+  while (Date.now() - startTime < timeoutMs) {
+    try {
+      if (fs.existsSync(eventsFile)) {
+        const content = fs.readFileSync(eventsFile, "utf-8");
+        const lines = content.trim().split("\n").filter(Boolean);
+
+        // Search from end (most recent first)
+        for (let i = lines.length - 1; i >= 0; i--) {
+          try {
+            const event = JSON.parse(lines[i]);
+            if (event.type === "result" && event.id === id) {
+              console.log(JSON.stringify(event));
+              process.exit(0);
+            }
+          } catch {
+            // Skip malformed lines
+          }
+        }
+      }
+    } catch {
+      // Ignore read errors, keep polling
+    }
+
+    await new Promise(resolve => setTimeout(resolve, pollInterval));
+  }
+
+  // Timeout - output to stdout for consistent JSON parsing
+  console.log(JSON.stringify({ error: "timeout", id, timeoutSec }));
+  process.exit(1);
+}
+
+/**
+ * Get interaction result (non-blocking)
+ * If no ID provided, returns all results
+ */
+function handleResult(args: string[]): void {
+  const id = args[0];
+  const host = selectPaneHost(process.cwd());
+  const eventsFile = getEventsFilePath(host.sessionName);
+
+  try {
+    if (fs.existsSync(eventsFile)) {
+      const content = fs.readFileSync(eventsFile, "utf-8");
+      const lines = content.trim().split("\n").filter(Boolean);
+
+      if (!id) {
+        // No ID provided - return all results
+        const results: unknown[] = [];
+        for (const line of lines) {
+          try {
+            const event = JSON.parse(line);
+            if (event.type === "result") {
+              results.push(event);
+            }
+          } catch {
+            // Skip malformed lines
+          }
+        }
+        console.log(JSON.stringify({ results }));
+        process.exit(0);
+      }
+
+      // Search for specific ID from end (most recent first)
+      for (let i = lines.length - 1; i >= 0; i--) {
+        try {
+          const event = JSON.parse(lines[i]);
+          if (event.type === "result" && event.id === id) {
+            console.log(JSON.stringify(event));
+            process.exit(0);
+          }
+        } catch {
+          // Skip malformed lines
+        }
+      }
+    }
+  } catch {
+    // Ignore errors
+  }
+
+  // No result found
+  if (!id) {
+    console.log(JSON.stringify({ results: [] }));
+  } else {
+    console.log(JSON.stringify({ status: "pending", id }));
+  }
+  process.exit(0);
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const cmd = args[0];
@@ -580,14 +660,19 @@ async function main() {
     process.exit(0);
   }
 
-  if (cmd === "up") {
-    await handleUp();
-    return;
-  }
-
   if (cmd === "run") {
     await handleRun(args.slice(1));
     process.exit(0);
+  }
+
+  if (cmd === "wait") {
+    await handleWait(args.slice(1));
+    return;
+  }
+
+  if (cmd === "result") {
+    handleResult(args.slice(1));
+    return;
   }
 
   console.error(`Unknown command: ${cmd}\nRun 'termos help' for usage`);

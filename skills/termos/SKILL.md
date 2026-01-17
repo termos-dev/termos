@@ -1,17 +1,17 @@
 ---
 name: termos
-description: Run Termos interactive UI inside Zellij for Codex sessions. Use when the user asks for interactive questions, confirmations, checklists, tables, code/diff/markdown/mermaid views, or any Termos UI. Requires `termos up` running.
+description: Run Termos interactive UI inside Zellij for Codex sessions. Use when the user asks for interactive questions, confirmations, checklists, tables, code/diff/markdown/mermaid views, or any Termos UI.
 ---
 
 # Termos
 
 ## Quick Start
 
-Run inside a Zellij session (or on macOS without Zellij) and start the event stream as a background/base process:
+Run inside a Zellij session (or on macOS without Zellij):
 ```bash
-termos up
+termos run --title "Confirm" confirm --prompt "Proceed?"
+termos wait <id>  # or use `termos result` for non-blocking
 ```
-Keep `termos up` running to receive interaction results.
 
 ## REQUIRED: Learn Component Args
 
@@ -23,12 +23,6 @@ termos run --help
 This prints all component arguments. Do NOT guess argument names.
 
 On macOS without Zellij, Termos will open Ghostty if available, otherwise a Terminal tab for each interaction.
-If `termos up` and `termos run` are in different directories, set a shared session name (required outside Zellij):
-```bash
-termos up --session demo
-termos run --session demo --title "Confirm" confirm --prompt "Proceed?"
-```
-You can also set `TERMOS_SESSION_NAME` for both commands.
 
 `--title` is required for all `termos run` invocations.
 
@@ -82,14 +76,16 @@ Note: Split positions only work in Zellij. On macOS without Zellij, split falls 
 
 ## Async Workflow (IMPORTANT)
 
-`termos run` returns immediately. Do NOT wait for results after each command.
+`termos run` returns immediately with an interaction ID. You can wait for results or check them later.
 
 **Correct pattern:**
 ```bash
 # Fire multiple interactions at once
 termos run --title "Q1" --position floating:top-left confirm --prompt "Approve?"
 termos run --title "Q2" --position floating:top-right checklist --items "A,B,C"
-# Continue working immediately, check termos up output later
+# Continue working, then check results:
+termos result  # all results
+termos wait <id>  # wait for specific one
 ```
 
 **Anti-pattern (don't do this):**

@@ -1,7 +1,7 @@
 import { Box, Text, useInput, useApp } from 'ink';
-import { useState, useEffect } from 'react';
+import { useState, useRef } from 'react';
 import { readFileSync } from 'fs';
-import { useTerminalSize, ScrollBar, useMouseScroll } from './shared/index.js';
+import { useTerminalSize, ScrollBar, useMouseScroll, useFileWatch } from './shared/index.js';
 
 declare const onComplete: (result: unknown) => void;
 declare const args: {
@@ -73,7 +73,9 @@ export default function TableViewer() {
   const visibleRows = Math.max(3, termRows - 8);
   const termWidth = termCols;
 
-  useEffect(() => {
+  const isFirstLoad = useRef(true);
+
+  useFileWatch(args?.file, () => {
     try {
       let data: Row[] = [];
 
@@ -98,6 +100,7 @@ export default function TableViewer() {
       }
 
       setRows(data);
+      setError(null);
 
       // Determine columns
       let cols: string[];
@@ -109,13 +112,15 @@ export default function TableViewer() {
       }
       setColumns(cols);
 
-      if (selectMode) {
+      // Only set initial selection on first load
+      if (isFirstLoad.current && selectMode) {
+        isFirstLoad.current = false;
         setSelectedRow(0);
       }
     } catch (e) {
       setError(`Error parsing data: ${e instanceof Error ? e.message : String(e)}`);
     }
-  }, []);
+  });
 
   const maxScroll = Math.max(0, rows.length - visibleRows);
   const maxColWidth = Math.floor((termWidth - columns.length * 3 - 4) / columns.length);

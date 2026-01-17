@@ -8,41 +8,106 @@ Initialize termos.md with project-specific instructions and preferences.
 
 Generate a `termos.md` file in the project root with project-specific instructions tailored to the user's setup.
 
-## Step 1: Start Termos
+## Step 1: Environment Detection & Explanation
 
-Start `termos up` first (required for interactive confirmations):
-
-```bash
-termos up
-```
-
-This runs in the background and streams events. Keep it running throughout init.
-
-## Step 2: Environment Detection
-
-Check what's available:
+Check environment and explain to user:
 
 ```bash
-# Check if Zellij is available
-which zellij && echo "ZELLIJ_AVAILABLE" || echo "ZELLIJ_NOT_AVAILABLE"
+# Detect environment
+ZELLIJ_ACTIVE=""
+ZELLIJ_INSTALLED=""
+PLATFORM=$(uname -s)
 
-# Check if Ghostty is available (macOS)
-[ -d "/Applications/Ghostty.app" ] && echo "GHOSTTY_AVAILABLE" || echo "GHOSTTY_NOT_AVAILABLE"
+[ -n "$ZELLIJ_SESSION_NAME" ] && ZELLIJ_ACTIVE="yes"
+which zellij > /dev/null 2>&1 && ZELLIJ_INSTALLED="yes"
+[ -d "/Applications/Ghostty.app" ] && GHOSTTY_AVAILABLE="yes"
 
-# Check platform
-uname -s
+# Detect all available editors
+EDITORS=""
+
+# TUI editors (can run in-pane)
+which nvim > /dev/null 2>&1 && EDITORS="$EDITORS nvim"
+which vim > /dev/null 2>&1 && EDITORS="$EDITORS vim"
+which hx > /dev/null 2>&1 && EDITORS="$EDITORS hx"
+which micro > /dev/null 2>&1 && EDITORS="$EDITORS micro"
+which nano > /dev/null 2>&1 && EDITORS="$EDITORS nano"
+which emacs > /dev/null 2>&1 && EDITORS="$EDITORS emacs"
+
+# GUI editors
+which code > /dev/null 2>&1 && EDITORS="$EDITORS code"
+which cursor > /dev/null 2>&1 && EDITORS="$EDITORS cursor"
+
+# macOS app detection (if CLI not found but app exists)
+[ -d "/Applications/Visual Studio Code.app" ] && ! echo "$EDITORS" | grep -q "code" && EDITORS="$EDITORS code"
+[ -d "/Applications/Cursor.app" ] && ! echo "$EDITORS" | grep -q "cursor" && EDITORS="$EDITORS cursor"
+
+echo "Platform: $PLATFORM"
+echo "In Zellij: ${ZELLIJ_ACTIVE:-no}"
+echo "Zellij installed: ${ZELLIJ_INSTALLED:-no}"
+echo "Ghostty: ${GHOSTTY_AVAILABLE:-no}"
+echo "Editors:$EDITORS"
 ```
 
-## Step 3: Ask User Preferences
+### Explain Environment to User
+
+Based on detection, explain the experience they'll get:
+
+**If inside Zellij (`ZELLIJ_ACTIVE=yes`):**
+> You're running inside Zellij - this gives you the best experience:
+> - **Split panes**: Side-by-side views for diffs, progress, code
+> - **Floating panes**: Overlay windows that don't disrupt your layout
+> - **Tabs**: Organize different termos views
+> - **Integrated**: Everything stays in one terminal window
+>
+> All termos features are fully supported!
+
+**If macOS without Zellij:**
+> You're on macOS outside Zellij. Termos will use Ghostty or Terminal:
+> - **Separate windows**: Each interaction opens in a new window
+> - **No split panes**: `split:right` and `split:down` aren't available
+> - **Still functional**: Floating positions work as separate windows
+>
+> For the best experience with split panes, run inside Zellij:
+> `zellij attach --create $(basename $PWD)`
+
+**If Linux without Zellij:**
+> On Linux, termos requires Zellij for pane management.
+> Start a Zellij session: `zellij attach --create $(basename $PWD)`
+> Then run `termos init` again inside the session.
+
+## Step 2: Ask User Preferences
 
 Use AskUserQuestion to gather preferences:
 
-### Question 1: IDE
-Ask which IDE/editor they're using:
-- Claude Code (CLI)
-- Cursor
-- VS Code with Claude extension
-- Other
+### Question 1: Preferred Editor
+Based on detected editors (from Step 1), ask which editor they prefer:
+- List all detected editors as options
+- First detected TUI editor (nvim, vim, hx) should be marked as recommended
+- Users can select "Other" to enter a custom editor command
+
+Editor type determines behavior:
+- **TUI editors** (nvim, vim, hx, micro, nano, emacs): Enable in-pane editing
+- **GUI editors** (code, cursor): Open files externally only
+
+Example options if `nvim`, `code`, `cursor` were detected:
+- **nvim (Recommended)**: Neovim - in-pane editing enabled
+- **vim**: Vim - in-pane editing enabled
+- **code**: VS Code - opens files externally
+- **cursor**: Cursor - opens files externally
+
+Editor reference table:
+| Editor | Type | Command | Line Format |
+|--------|------|---------|-------------|
+| nvim | TUI | `nvim` | `+{line}` |
+| vim | TUI | `vim` | `+{line}` |
+| hx | TUI | `hx` | `{file}:{line}` |
+| micro | TUI | `micro` | `+{line}` |
+| nano | TUI | `nano` | `+{line}` |
+| emacs | TUI | `emacs -nw` | `+{line}` |
+| code | GUI | `code` | `-g {file}:{line}` |
+| cursor | GUI | `cursor` | `-g {file}:{line}` |
+
+If no editors detected, skip this question and use system default.
 
 ### Question 2: Interaction Style
 Ask their preferred interaction style:
@@ -74,7 +139,20 @@ Ask if they want periodic check-ins while Claude works:
 - **Yes (Recommended)**: Keep me engaged with questions and status updates
 - **No**: Only interact when necessary
 
-## Step 4: Generate termos.md
+### Question 7: Live Git Diff Pane (Zellij only)
+If user is in Zellij, ask if they want a persistent git diff pane:
+- **Yes (Recommended)**: Show live git diff in a split pane while coding
+- **No**: Skip git diff pane
+
+If yes, ask for update interval:
+- **1 second**: Real-time updates (higher CPU)
+- **2 seconds (Recommended)**: Good balance
+- **5 seconds**: Lower CPU usage
+
+This pane shows `git diff` output and updates automatically as files change.
+Command: `termos run --title "Git Diff" --position split:right code --watch-cmd "git diff --color=always" --interval 2000`
+
+## Step 3: Generate termos.md
 
 Based on answers, generate `termos.md` in the project root with:
 
@@ -84,9 +162,23 @@ Based on answers, generate `termos.md` in the project root with:
 # Project: {project_name}
 
 ## Environment
-- IDE: {ide}
 - Platform: {platform}
 - Zellij: {available/not available}
+
+## Editor
+```yaml
+editor: {editor}
+type: {tui|gui}
+command: {editor_command}
+lineFormat: "{line_format}"
+```
+
+{if type is TUI:}
+In-pane editing enabled. Press `e` in code viewer to edit with {editor}.
+After editing, the viewer restarts so you can review changes.
+{else:}
+Opens files externally in {editor}. Press `e` in code viewer to open file.
+{endif}
 
 ## Interaction Preferences
 {based on style choice}
@@ -132,12 +224,18 @@ Update the current step as you complete each task.}
 - Use `floating:bottom-right` to stay unobtrusive
 Example: `termos run --title "Quick Check" --position floating:bottom-right ask --prompt "All good so far?"`}
 
+### Live Git Diff Pane (Zellij only)
+{if selected: Show live git diff in a split pane while coding:
+`termos run --title "Git Diff" --position split:right code --watch-cmd "git diff --color=always" --interval {interval}`
+This updates automatically every {interval}ms as you make changes.
+Start this when beginning a coding session.}
+
 ## Component Preferences
 - Default position: {floating/floating:center/split}
 - Confirmations: {floating:center for important, floating for routine}
 ```
 
-## Step 5: Write the File
+## Step 4: Write the File
 
 Write `termos.md` to the project root.
 
@@ -146,7 +244,7 @@ Confirm with user before writing:
 termos run --title "Confirm" confirm --prompt "Create termos.md with these settings?"
 ```
 
-## Step 6: Update CLAUDE.md
+## Step 5: Update CLAUDE.md
 
 If a `CLAUDE.md` exists in the project root, append termos instructions so Claude actively uses interactive components:
 
@@ -156,12 +254,18 @@ if [ -f "CLAUDE.md" ]; then
 
 ## Termos Interactive Components
 
-This project uses termos for interactive UI. **Run `termos up` first**, then read `termos.md` for preferences.
+This project uses termos for interactive UI. Read `termos.md` for interaction preferences.
+
+Workflow:
+1. `termos run ...` spawns pane, returns interaction ID
+2. `termos wait <id> &` runs in background (non-blocking)
+3. `termos result` checks all results, or `termos result <id>` for specific one
+
+Tip: Run wait in background so user isn't blocked while interacting with the pane.
 
 - **USE termos components** for confirmations, progress, and user engagement
 - **Show plan files** in a pane during plan mode (if enabled in termos.md)
 - **Display task progress** visually for multi-step operations
-- **Keep the user engaged** with periodic check-ins and status panes
 
 Run `termos --help` for available components. Always use `--title` and `--position` flags.
 EOF
@@ -173,7 +277,7 @@ If no `CLAUDE.md` exists, ask the user if they want to create one with termos in
 ## Example Output
 
 For a user who selected:
-- IDE: Claude Code
+- Editor: nvim
 - Style: Balanced
 - Use cases: Confirmations, Progress, Always-on widgets
 - Plan mode display: Yes
@@ -185,9 +289,19 @@ For a user who selected:
 # Project: my-app
 
 ## Environment
-- IDE: Claude Code
 - Platform: macOS
 - Zellij: available
+
+## Editor
+```yaml
+editor: nvim
+type: tui
+command: nvim
+lineFormat: "+{line}"
+```
+
+In-pane editing enabled. Press `e` in code viewer to edit with nvim.
+After editing, the viewer restarts so you can review changes.
 
 ## Interaction Preferences
 Show interactions for important decisions. Skip trivial confirmations.

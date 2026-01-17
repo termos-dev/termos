@@ -1,6 +1,7 @@
 import { Box, Text, useInput, useApp, useStdout } from 'ink';
-import { useState, useEffect } from 'react';
-import { readFileSync, watchFile, unwatchFile } from 'fs';
+import { useState } from 'react';
+import { readFileSync } from 'fs';
+import { useFileWatch } from './shared/index.js';
 
 /**
  * Calculate ideal height (in rows) based on component args
@@ -182,86 +183,74 @@ export default function Gauge() {
     ? JSON.parse(args.thresholds)
     : {};
 
-  useEffect(() => {
-    const loadData = () => {
-      try {
-        let data: GaugeData[];
+  useFileWatch(args?.file, () => {
+    try {
+      let data: GaugeData[];
 
-        if (args?.data) {
-          const parsed = JSON.parse(args.data);
-          data = Array.isArray(parsed)
-            ? parsed.map(g => ({
-                value: Number(g.value ?? 0),
-                min: Number(g.min ?? 0),
-                max: Number(g.max ?? 100),
-                label: String(g.label || ''),
-                unit: String(g.unit || '%'),
-                color: g.color as string | undefined,
-              }))
-            : [{
-                value: Number(parsed.value ?? 0),
-                min: Number(parsed.min ?? 0),
-                max: Number(parsed.max ?? 100),
-                label: String(parsed.label || ''),
-                unit: String(parsed.unit || '%'),
-                color: parsed.color as string | undefined,
-              }];
-        } else if (args?.file) {
-          let content: string;
-          try {
-            content = readFileSync(args.file, 'utf-8');
-          } catch (readErr) {
-            // File might be temporarily unavailable during write, skip this update
-            return;
-          }
-          const parsed = JSON.parse(content);
-          data = Array.isArray(parsed)
-            ? parsed.map(g => ({
-                value: Number(g.value ?? 0),
-                min: Number(g.min ?? 0),
-                max: Number(g.max ?? 100),
-                label: String(g.label || ''),
-                unit: String(g.unit || '%'),
-                color: g.color as string | undefined,
-              }))
-            : [{
-                value: Number(parsed.value ?? 0),
-                min: Number(parsed.min ?? 0),
-                max: Number(parsed.max ?? 100),
-                label: String(parsed.label || ''),
-                unit: String(parsed.unit || '%'),
-                color: parsed.color as string | undefined,
-              }];
-        } else if (args?.value !== undefined) {
-          data = [{
-            value: parseFloat(args.value),
-            min: parseFloat(args.min || '0'),
-            max: parseFloat(args.max || '100'),
-            label: args.label || '',
-            unit: args.unit || '%',
-            color: args.color,
-          }];
-        } else {
-          setError('No data. Use --value <n>, --file <path>, or --data <json>');
+      if (args?.data) {
+        const parsed = JSON.parse(args.data);
+        data = Array.isArray(parsed)
+          ? parsed.map(g => ({
+              value: Number(g.value ?? 0),
+              min: Number(g.min ?? 0),
+              max: Number(g.max ?? 100),
+              label: String(g.label || ''),
+              unit: String(g.unit || '%'),
+              color: g.color as string | undefined,
+            }))
+          : [{
+              value: Number(parsed.value ?? 0),
+              min: Number(parsed.min ?? 0),
+              max: Number(parsed.max ?? 100),
+              label: String(parsed.label || ''),
+              unit: String(parsed.unit || '%'),
+              color: parsed.color as string | undefined,
+            }];
+      } else if (args?.file) {
+        let content: string;
+        try {
+          content = readFileSync(args.file, 'utf-8');
+        } catch (readErr) {
+          // File might be temporarily unavailable during write, skip this update
           return;
         }
-
-        setGauges(data);
-      } catch (e) {
-        setError(`Error: ${e instanceof Error ? e.message : String(e)}`);
+        const parsed = JSON.parse(content);
+        data = Array.isArray(parsed)
+          ? parsed.map(g => ({
+              value: Number(g.value ?? 0),
+              min: Number(g.min ?? 0),
+              max: Number(g.max ?? 100),
+              label: String(g.label || ''),
+              unit: String(g.unit || '%'),
+              color: g.color as string | undefined,
+            }))
+          : [{
+              value: Number(parsed.value ?? 0),
+              min: Number(parsed.min ?? 0),
+              max: Number(parsed.max ?? 100),
+              label: String(parsed.label || ''),
+              unit: String(parsed.unit || '%'),
+              color: parsed.color as string | undefined,
+            }];
+      } else if (args?.value !== undefined) {
+        data = [{
+          value: parseFloat(args.value),
+          min: parseFloat(args.min || '0'),
+          max: parseFloat(args.max || '100'),
+          label: args.label || '',
+          unit: args.unit || '%',
+          color: args.color,
+        }];
+      } else {
+        setError('No data. Use --value <n>, --file <path>, or --data <json>');
+        return;
       }
-    };
 
-    loadData();
-
-    // Watch file for updates
-    if (args?.file) {
-      watchFile(args.file, { interval: 500 }, loadData);
-      return () => {
-        if (args?.file) unwatchFile(args.file);
-      };
+      setGauges(data);
+    } catch (e) {
+      setError(`Error: ${e instanceof Error ? e.message : String(e)}`);
     }
-  }, []);
+  }, { interval: 500 });
 
   useInput((input, key) => {
     if (key.escape || input === 'q' || key.return) {

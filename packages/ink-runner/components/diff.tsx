@@ -1,9 +1,9 @@
 import { Box, Text, useInput, useApp } from 'ink';
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { execFileSync } from 'child_process';
 import { readFileSync } from 'fs';
 import * as path from 'path';
-import { useTerminalSize, ScrollBar, useMouseScroll } from './shared/index.js';
+import { useTerminalSize, ScrollBar, useMouseScroll, useMultiFileWatch } from './shared/index.js';
 
 declare const onComplete: (result: unknown) => void;
 declare const args: {
@@ -121,7 +121,8 @@ export default function DiffViewer() {
   const title = args?.title || (args?.file ? path.basename(args.file) : 'Diff');
   const visibleLines = Math.max(5, rows - 6);
 
-  useEffect(() => {
+  // Watch files for changes (only for file comparison mode)
+  useMultiFileWatch([args?.before, args?.after], () => {
     try {
       let diffText = '';
 
@@ -146,6 +147,7 @@ export default function DiffViewer() {
 
       const parsed = parseDiff(diffText);
       setLines(parsed);
+      setError(null);
 
       // Calculate stats
       const additions = parsed.filter(l => l.type === 'add').length;
@@ -154,7 +156,7 @@ export default function DiffViewer() {
     } catch (e) {
       setError(`Error getting diff: ${e instanceof Error ? e.message : String(e)}`);
     }
-  }, []);
+  });
 
   const maxScroll = Math.max(0, lines.length - visibleLines);
   const showScrollBar = lines.length > visibleLines;

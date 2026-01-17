@@ -1,8 +1,8 @@
 import { Box, Text, useInput, useApp } from 'ink';
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useMemo } from 'react';
 import { readFileSync, readdirSync, statSync } from 'fs';
 import { join, basename } from 'path';
-import { useTerminalSize, ScrollBar, useMouseScroll } from './shared/index.js';
+import { useTerminalSize, ScrollBar, useMouseScroll, useFileWatch } from './shared/index.js';
 
 declare const onComplete: (result: unknown) => void;
 declare const args: {
@@ -133,7 +133,7 @@ export default function Tree() {
   const showHidden = args?.showHidden === 'true';
   const visibleRows = Math.max(3, rows - 6);
 
-  useEffect(() => {
+  useFileWatch(args?.file, () => {
     try {
       let tree: TreeNode;
 
@@ -151,10 +151,11 @@ export default function Tree() {
       }
 
       setRoot(tree);
+      setError(null);
     } catch (e) {
       setError(`Error: ${e instanceof Error ? e.message : String(e)}`);
     }
-  }, []);
+  });
 
   const flatNodes = useMemo(() => {
     if (!root) return [];
