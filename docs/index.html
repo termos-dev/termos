@@ -123,7 +123,7 @@
           <span class="gradient-text">Autonomous, not absent.</span>
         </h1>
         <p class="mx-auto mt-6 max-w-2xl text-xl text-slate-300">
-          Claude Code runs. You stay in control.
+          Interactive terminal UI that Claude controls to ask questions, show progress, and get your approval.
         </p>
 
         <!-- CTA Button -->
@@ -141,14 +141,13 @@
 
         <!-- Demo Video -->
         <div class="mt-12 overflow-hidden rounded-2xl border border-white/10 bg-black/40 shadow-2xl">
-          <div class="min-h-[420px] w-full">
-            <!-- Primary demo - side by side comparison -->
-            <div id="demo-container" class="h-[420px] w-full flex items-center justify-center">
+          <div class="min-h-[320px] w-full">
+            <div id="demo-container" class="h-[320px] w-full flex items-center justify-center">
               <div id="asciinema-demo"></div>
             </div>
           </div>
         </div>
-        <p class="mt-4 text-sm text-slate-400">Without Termos vs With Termos</p>
+        <p class="mt-4 text-sm text-slate-400">Claude launches floating panes or terminal windows to keep you in the loop</p>
       </section>
 
       <!-- Feature Cards -->
@@ -494,9 +493,9 @@ claude plugins install termos</code></pre>
       const demoContainer = document.getElementById("asciinema-demo");
       if (window.AsciinemaPlayer && demoContainer) {
         AsciinemaPlayer.create(
-          "recordings/without-termos.cast",
+          "recordings/hero-demo.cast",
           demoContainer,
-          { fit: "width", autoPlay: true, loop: true, speed: 1.5 }
+          { fit: "width", autoPlay: true, loop: true, speed: 1 }
         );
       }
 
