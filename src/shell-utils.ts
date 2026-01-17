@@ -1,3 +1,9 @@
+import * as fs from "fs";
+import * as path from "path";
+import { fileURLToPath } from "url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
 /**
  * Shared shell utility functions
  */
@@ -7,6 +13,28 @@
  */
 export function shellEscape(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * Load a shell template from the templates directory
+ */
+export function loadShellTemplate(name: string): string {
+  const templatePath = path.join(__dirname, "templates", `${name}.sh`);
+  return fs.readFileSync(templatePath, "utf8");
+}
+
+/**
+ * Render a shell template with variable substitution
+ */
+export function renderShellTemplate(
+  template: string,
+  vars: Record<string, string>
+): string {
+  let result = template;
+  for (const [key, value] of Object.entries(vars)) {
+    result = result.replace(new RegExp(`\\{\\{${key}\\}\\}`, "g"), value);
+  }
+  return result;
 }
 
 /**

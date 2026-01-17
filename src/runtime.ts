@@ -10,13 +10,20 @@ export function getRuntimeRoot(): string {
   return path.join(os.homedir(), ".termos", "sessions");
 }
 
-export function normalizeSessionName(sessionName: string): string {
-  const cleaned = sessionName.replace(/[\\/]/g, "_").replace(/\0/g, "").trim();
-  return cleaned.length > 0 ? cleaned : "session";
+/**
+ * Convert a path to a session name by replacing slashes with dashes.
+ * Similar to how Claude Code stores projects in ~/.claude/projects/
+ * e.g., /Users/foo/myproject -> -Users-foo-myproject
+ */
+export function pathToSessionName(cwd: string): string {
+  // Normalize and convert slashes to dashes
+  const normalized = path.resolve(cwd);
+  const sessionName = normalized.replace(/[/\\]/g, "-");
+  return sessionName || "session";
 }
 
 export function getSessionRuntimeDir(sessionName: string): string {
-  return path.join(getRuntimeRoot(), normalizeSessionName(sessionName));
+  return path.join(getRuntimeRoot(), sessionName);
 }
 
 export function getEventsFilePath(sessionName: string): string {
@@ -31,21 +38,4 @@ export function ensureEventsFile(sessionName: string): string {
     fs.writeFileSync(filePath, "", { flag: "w" });
   }
   return filePath;
-}
-
-// Heartbeat file management for session lifecycle
-export function getHeartbeatPath(sessionName: string): string {
-  return path.join(getSessionRuntimeDir(sessionName), "heartbeat");
-}
-
-export function ensureHeartbeat(sessionName: string): void {
-  const p = getHeartbeatPath(sessionName);
-  fs.mkdirSync(path.dirname(p), { recursive: true });
-  fs.closeSync(fs.openSync(p, "w"));
-}
-
-export function touchHeartbeat(sessionName: string): void {
-  const p = getHeartbeatPath(sessionName);
-  const now = new Date();
-  fs.utimesSync(p, now, now);
 }

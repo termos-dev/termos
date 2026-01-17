@@ -61,3 +61,14 @@ Then test with Claude Code:
 cd /path/to/project
 # Claude will use the updated plugin
 ```
+
+## Termos Interactive Components
+
+This project uses termos for interactive UI. **Run `termos up` first**, then read `termos.md` for preferences.
+
+- **USE termos components** for confirmations, progress, and user engagement
+- **Show plan files** in a pane during plan mode (if enabled in termos.md)
+- **Display task progress** visually for multi-step operations
+- **Keep the user engaged** with periodic check-ins and status panes
+
+Run `termos --help` for available components. Always use `--title` and `--position` flags.

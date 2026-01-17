@@ -3,7 +3,7 @@ import { promisify } from "util";
 import * as path from "path";
 import * as os from "os";
 import * as fs from "fs";
-import { normalizeSessionName } from "./runtime.js";
+import { pathToSessionName } from "./runtime.js";
 import { runFloatingPane, runTab, runSplitPane, getOptimalSplitDirection } from "./zellij.js";
 import { shellEscape, buildMacOSTerminalCommand } from "./shell-utils.js";
 
@@ -65,9 +65,8 @@ function resolveSessionName(cwd: string): { name: string; inZellij: boolean } {
     return { name: zellijName.trim(), inZellij: true };
   }
 
-  // Session name is always derived from cwd
-  const base = path.basename(cwd || process.cwd()) || "session";
-  return { name: normalizeSessionName(base), inZellij: false };
+  // Session name derived from full cwd path (like Claude's ~/.claude/projects/)
+  return { name: pathToSessionName(cwd || process.cwd()), inZellij: false };
 }
 
 function escapeAppleScript(value: string): string {
@@ -111,7 +110,8 @@ function createZellijHost(sessionName: string): PaneHost {
       const position = options.position ?? "floating";
 
       if (position === "tab") {
-        await runTab(command, { name: options.name, cwd: options.cwd }, env);
+        // Pass sessionName to target the correct Zellij session
+        await runTab(command, { name: options.name, cwd: options.cwd }, env, sessionName);
       } else if (position.startsWith("split")) {
         let direction: "right" | "down" | undefined;
         if (position === "split:right") direction = "right";
@@ -122,20 +122,21 @@ function createZellijHost(sessionName: string): PaneHost {
           cwd: options.cwd,
           closeOnExit: options.closeOnExit,
           direction: direction ?? getOptimalSplitDirection(),
-        }, env);
+        }, env, sessionName);
       } else {
         // floating presets
         const geometry = FLOATING_PRESETS[position] ?? FLOATING_PRESETS["floating"];
         const effectiveHeight = options.heightPercent
           ? String(options.heightPercent)
           : geometry.height;
+        // Pass sessionName to target the correct Zellij session
         await runFloatingPane(command, {
           name: options.name,
           cwd: options.cwd,
           closeOnExit: options.closeOnExit,
           ...geometry,
           height: effectiveHeight,
-        }, env);
+        }, env, sessionName);
       }
     },
   };
@@ -182,8 +183,8 @@ ${shellCommand}
       } else {
         await execFileAsync("open", ["-na", ghosttyApp, "--args", "-e", tmpFile]);
       }
-      // Clean up after delay
-      setTimeout(() => { try { fs.unlinkSync(tmpFile); } catch {} }, 2000);
+      // Clean up after delay (longer delay to ensure script has time to start)
+      setTimeout(() => { try { fs.unlinkSync(tmpFile); } catch {} }, 10000);
     },
   };
 }
@@ -236,6 +237,7 @@ end tell`;
 export function selectPaneHost(cwd: string): PaneHost {
   const resolved = resolveSessionName(cwd);
 
+  // Use Zellij if running inside it (ZELLIJ_SESSION_NAME is set)
   if (resolved.inZellij) {
     return createZellijHost(resolved.name);
   }

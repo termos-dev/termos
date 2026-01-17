@@ -1,8 +1,35 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
 import { buildShellCommand } from "./shell-utils.js";
 
 const execFileAsync = promisify(execFile);
+
+/**
+ * Write a shell script to a temp file and return its path.
+ * This allows running commands in an interactive shell context with proper TTY.
+ */
+function writeTempScript(shellCommand: string): string {
+  const shell = process.env.SHELL || "/bin/sh";
+  const tempFile = path.join(os.tmpdir(), `termos-pane-${Date.now()}.sh`);
+  const scriptContent = `#!${shell}
+${shellCommand}
+`;
+  fs.writeFileSync(tempFile, scriptContent, { mode: 0o755 });
+  return tempFile;
+}
+
+/**
+ * Schedule cleanup of a temp script file after a delay.
+ * Zellij run returns before the script starts, so we need to wait.
+ */
+function scheduleScriptCleanup(scriptPath: string, delayMs: number = 10000): void {
+  setTimeout(() => {
+    try { fs.unlinkSync(scriptPath); } catch { /* ignore */ }
+  }, delayMs);
+}
 
 interface FloatingPaneOptions {
   name?: string;
@@ -17,7 +44,8 @@ interface FloatingPaneOptions {
 export async function runFloatingPane(
   command: string,
   options: FloatingPaneOptions = {},
-  env?: Record<string, string>
+  env?: Record<string, string>,
+  sessionName?: string
 ): Promise<void> {
   const args = ["run", "--floating", "--pinned", "true"];
 
@@ -30,34 +58,50 @@ export async function runFloatingPane(
   if (options.y) args.push("--y", options.y);
 
   const shellCommand = buildShellCommand(command, env);
-  const shell = process.env.SHELL || "sh";
-  args.push("--", shell, "-lc", shellCommand);
+  // Write to temp script and execute directly to ensure proper TTY/raw mode for Ink
+  const scriptPath = writeTempScript(shellCommand);
+  args.push("--", scriptPath);
 
-  await execFileAsync("zellij", args);
+  // Pass session name via env var if running from outside the session
+  const execEnv = sessionName ? { ...process.env, ZELLIJ_SESSION_NAME: sessionName } : undefined;
+  await execFileAsync("zellij", args, execEnv ? { env: execEnv } : undefined);
+
+  // Schedule cleanup after the script has had time to start
+  scheduleScriptCleanup(scriptPath);
 }
 
 export async function runTab(
   command: string,
   options: FloatingPaneOptions = {},
-  env?: Record<string, string>
+  env?: Record<string, string>,
+  sessionName?: string
 ): Promise<void> {
   const name = options.name ?? "termos";
   const shellCommand = buildShellCommand(command, env);
-  const shell = process.env.SHELL || "sh";
+
+  // Pass session name via env var if running from outside the session
+  const execEnv = sessionName ? { ...process.env, ZELLIJ_SESSION_NAME: sessionName } : undefined;
+  const execOptions = execEnv ? { env: execEnv } : undefined;
 
   const tabArgs = ["action", "new-tab", "--name", name];
   if (options.cwd) tabArgs.push("--cwd", options.cwd);
-  await execFileAsync("zellij", tabArgs);
+  await execFileAsync("zellij", tabArgs, execOptions);
   try {
-    await execFileAsync("zellij", ["action", "go-to-tab-name", name]);
+    await execFileAsync("zellij", ["action", "go-to-tab-name", name], execOptions);
   } catch {
     // ignore focus failures; run will still work in most cases
   }
 
+  // Write to temp script and execute directly to ensure proper TTY/raw mode for Ink
+  const scriptPath = writeTempScript(shellCommand);
   const runArgs = ["run", "--in-place", "--name", name];
   if (options.cwd) runArgs.push("--cwd", options.cwd);
-  runArgs.push("--", shell, "-lc", shellCommand);
-  await execFileAsync("zellij", runArgs);
+  runArgs.push("--", scriptPath);
+
+  await execFileAsync("zellij", runArgs, execOptions);
+
+  // Schedule cleanup after the script has had time to start
+  scheduleScriptCleanup(scriptPath);
 }
 
 interface SplitPaneOptions {
@@ -87,7 +131,8 @@ export function getOptimalSplitDirection(): "right" | "down" {
 export async function runSplitPane(
   command: string,
   options: SplitPaneOptions = {},
-  env?: Record<string, string>
+  env?: Record<string, string>,
+  sessionName?: string
 ): Promise<void> {
   const direction = options.direction ?? getOptimalSplitDirection();
   const args = ["run", "--direction", direction, "--stacked"];
@@ -97,8 +142,14 @@ export async function runSplitPane(
   if (options.cwd) args.push("--cwd", options.cwd);
 
   const shellCommand = buildShellCommand(command, env);
-  const shell = process.env.SHELL || "sh";
-  args.push("--", shell, "-lc", shellCommand);
+  // Write to temp script and execute directly to ensure proper TTY/raw mode for Ink
+  const scriptPath = writeTempScript(shellCommand);
+  args.push("--", scriptPath);
 
-  await execFileAsync("zellij", args);
+  // Pass session name via env var if running from outside the session
+  const execEnv = sessionName ? { ...process.env, ZELLIJ_SESSION_NAME: sessionName } : undefined;
+  await execFileAsync("zellij", args, execEnv ? { env: execEnv } : undefined);
+
+  // Schedule cleanup after the script has had time to start
+  scheduleScriptCleanup(scriptPath);
 }

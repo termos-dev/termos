@@ -15,7 +15,7 @@
     "!dist/**/*.map"
   ],
   "scripts": {
-    "build": "tsc && npm run bundle:ink-runner",
+    "build": "tsc && cp -r src/templates dist/ && npm run bundle:ink-runner",
     "bundle:ink-runner": "node scripts/bundle-ink-runner.mjs",
     "dev": "npm run serve",
     "dev:cli": "tsc --watch",

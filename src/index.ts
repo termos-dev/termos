@@ -5,12 +5,40 @@ import * as os from "os";
 import * as path from "path";
 import { fileURLToPath } from "url";
 import { InteractionManager, type InteractionResult } from "./interaction-manager.js";
-import { ensureEventsFile, ensureHeartbeat, touchHeartbeat } from "./runtime.js";
+import { ensureEventsFile, getSessionRuntimeDir, getRuntimeRoot } from "./runtime.js";
 import { selectPaneHost, VALID_POSITIONS, type PositionPreset } from "./pane-hosts.js";
-import { generateFullHelp, componentSchemas, type FormSchema } from "@termosdev/shared";
+import { generateFullHelp, componentSchemas, normalizeFormSchema, type FormSchema } from "@termosdev/shared";
 import { startCommandWatcher, type ParseMode } from "./command-watcher.js";
 import { getComponentHeight, rowsToPercent } from "./height-calculator.js";
 import { loadMergedInstructions } from "./instructions-loader.js";
+import { extractFlags } from "./arg-parser.js";
+
+/**
+ * Get list of available session names (directories in ~/.termos/sessions/)
+ */
+function getAvailableSessions(): string[] {
+  const sessionsDir = getRuntimeRoot();
+  try {
+    return fs.readdirSync(sessionsDir).filter(name => {
+      const sessionPath = path.join(sessionsDir, name);
+      return fs.statSync(sessionPath).isDirectory();
+    });
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Check if a session exists. Returns true if session directory exists.
+ */
+function sessionExists(sessionName: string): boolean {
+  const sessionDir = getSessionRuntimeDir(sessionName);
+  try {
+    return fs.statSync(sessionDir).isDirectory();
+  } catch {
+    return false;
+  }
+}
 
 function showRunHelp(): void {
   console.log(generateFullHelp());
@@ -21,8 +49,8 @@ function showHelp(): void {
 termos - Interactive UI runner for Claude Code (Zellij, Ghostty, or macOS Terminal)
 
 Usage:
-  termos up                                        Start session (creates heartbeat, streams events)
-                                                   Run as background task; panes close when session ends.
+  termos up                                        Start session and stream events
+                                                   Creates session directory; must be running to receive results.
 
   termos run --title <text> <component>            Run an Ink component (built-in or custom .tsx)
   termos run --title <text> --cmd "<command>"      Run a shell command (recommended for agents)
@@ -50,9 +78,9 @@ Live Data Options:
   -h, --help            Show this help
 
 Session Lifecycle:
-  When 'termos up' is running, all spawned panes are tracked via heartbeat.
-  When the session ends (termos up exits), panes automatically close within 2 seconds.
-  Without 'termos up', panes persist until manually closed.
+  Run 'termos up' in your project directory to create a session.
+  Session name is derived from the full path (e.g., /Users/foo/project → -Users-foo-project).
+  In Zellij, the session name is the Zellij session name.
 
 Examples:
   termos run --title "Lines" gauge --watch-cmd "wc -l *.ts | awk '{print \\$1}'" --max 10000
@@ -69,10 +97,6 @@ Examples:
 async function handleUp(): Promise<void> {
   const host = selectPaneHost(process.cwd());
   const eventsFile = ensureEventsFile(host.sessionName);
-
-  // Always start heartbeat
-  ensureHeartbeat(host.sessionName);
-  setInterval(() => touchHeartbeat(host.sessionName), 1000);
 
   console.log("Termos up is running.");
   console.log(`Session: ${host.sessionName}`);
@@ -177,53 +201,23 @@ async function handleRun(args: string[]): Promise<void> {
     "gauge": "gauge.tsx",
     "gauge.tsx": "gauge.tsx",
   };
-  for (let i = 0; i < restArgs.length; i++) {
-    const arg = restArgs[i];
-    if (arg === "--") break;
-    if (arg === "--title" && restArgs[i + 1]) {
-      title = restArgs[i + 1];
-      restArgs.splice(i, 2); i--;
-    } else if (arg.startsWith("--title=")) {
-      title = arg.slice(8);
-      restArgs.splice(i, 1); i--;
-    } else if (arg === "--position" && restArgs[i + 1]) {
-      position = restArgs[i + 1] as PositionPreset;
-      restArgs.splice(i, 2); i--;
-    } else if (arg.startsWith("--position=")) {
-      position = arg.slice("--position=".length) as PositionPreset;
-      restArgs.splice(i, 1); i--;
-    } else if (arg === "--cmd" && restArgs[i + 1]) {
-      cmdValue = restArgs[i + 1];
-      restArgs.splice(i, 2); i--;
-    } else if (arg.startsWith("--cmd=")) {
-      cmdValue = arg.slice("--cmd=".length);
-      restArgs.splice(i, 1); i--;
-    } else if (arg === "--cmd-file" && restArgs[i + 1]) {
-      cmdFileValue = restArgs[i + 1];
-      restArgs.splice(i, 2); i--;
-    } else if (arg.startsWith("--cmd-file=")) {
-      cmdFileValue = arg.slice("--cmd-file=".length);
-      restArgs.splice(i, 1); i--;
-    } else if (arg === "--watch-cmd" && restArgs[i + 1]) {
-      watchCmdValue = restArgs[i + 1];
-      restArgs.splice(i, 2); i--;
-    } else if (arg.startsWith("--watch-cmd=")) {
-      watchCmdValue = arg.slice("--watch-cmd=".length);
-      restArgs.splice(i, 1); i--;
-    } else if (arg === "--interval" && restArgs[i + 1]) {
-      intervalValue = parseInt(restArgs[i + 1], 10);
-      restArgs.splice(i, 2); i--;
-    } else if (arg.startsWith("--interval=")) {
-      intervalValue = parseInt(arg.slice("--interval=".length), 10);
-      restArgs.splice(i, 1); i--;
-    } else if (arg === "--parse" && restArgs[i + 1]) {
-      parseValue = restArgs[i + 1] as ParseMode;
-      restArgs.splice(i, 2); i--;
-    } else if (arg.startsWith("--parse=")) {
-      parseValue = arg.slice("--parse=".length) as ParseMode;
-      restArgs.splice(i, 1); i--;
-    }
-  }
+  // Extract flags using reusable parser
+  const flags = extractFlags(restArgs, [
+    { name: "title" },
+    { name: "position" },
+    { name: "cmd" },
+    { name: "cmd-file" },
+    { name: "watch-cmd" },
+    { name: "interval" },
+    { name: "parse" },
+  ]);
+  title = flags.title;
+  position = flags.position as PositionPreset | undefined;
+  cmdValue = flags.cmd;
+  cmdFileValue = flags["cmd-file"];
+  watchCmdValue = flags["watch-cmd"];
+  intervalValue = flags.interval ? parseInt(flags.interval, 10) : undefined;
+  parseValue = flags.parse as ParseMode | undefined;
 
   const sepIdx = restArgs.indexOf("--");
   const wait = hasWait;
@@ -289,6 +283,19 @@ async function handleRun(args: string[]): Promise<void> {
   const isCommandMode = cmdValue !== undefined || cmdFileValue !== undefined || sepIdx !== -1;
 
   const host = selectPaneHost(process.cwd());
+
+  // Check if session exists (created by `termos up`)
+  if (!sessionExists(host.sessionName)) {
+    const available = getAvailableSessions();
+    let errorMsg = `Session '${host.sessionName}' not found.\n\n`;
+    errorMsg += `Run 'termos up' in this directory first to create a session.\n`;
+    errorMsg += `\nTip: Stay in the project root directory for all termos commands.`;
+    if (available.length > 0) {
+      errorMsg += `\n\nAvailable sessions:\n${available.map(s => `  - ${s}`).join("\n")}`;
+    }
+    emitRunError(errorMsg);
+    process.exit(1);
+  }
 
   let inkFile: string | undefined;
   let inkArgs: Record<string, string> | undefined;
@@ -371,87 +378,10 @@ async function handleRun(args: string[]): Promise<void> {
     }
 
 
-    const normalizeQuestions = (schemaInput: FormSchema | { questions?: Array<Record<string, unknown>> }): FormSchema => {
-      if (!schemaInput || typeof schemaInput !== "object") return schemaInput as FormSchema;
-      const base = schemaInput as { questions?: Array<Record<string, unknown>> };
-      if (!Array.isArray(base.questions)) return schemaInput as FormSchema;
-
-      const used = new Set<string>();
-      const slugify = (value: string, fallback: string) => {
-        const slug = value
-          .toLowerCase()
-          .replace(/[^a-z0-9]+/g, "_")
-          .replace(/^_+|_+$/g, "");
-        return slug.length > 0 ? slug : fallback;
-      };
-
-      const questions = base.questions.map((q, idx) => {
-        const next = { ...q };
-        if (!next.question && typeof (next as { prompt?: unknown }).prompt === "string") {
-          next.question = (next as { prompt?: string }).prompt;
-        }
-        if (!next.options && Array.isArray((next as { choices?: unknown }).choices)) {
-          next.options = (next as { choices?: unknown[] }).choices;
-        }
-        if (!next.placeholder && typeof (next as { default?: unknown }).default === "string") {
-          next.placeholder = (next as { default?: string }).default;
-        }
-
-        const questionText = typeof next.question === "string" ? next.question : "";
-        let header = typeof next.header === "string" ? next.header : "";
-        if (!header) {
-          header = slugify(questionText, `q${idx + 1}`);
-        }
-        let unique = header;
-        let counter = 2;
-        while (used.has(unique)) {
-          unique = `${header}_${counter++}`;
-        }
-        used.add(unique);
-        next.header = unique;
-
-        const options = next.options;
-        if (Array.isArray(options)) {
-          const normalized = options.map((opt) => {
-            if (typeof opt === "string" || typeof opt === "number") {
-              return { label: String(opt) };
-            }
-            if (opt && typeof opt === "object" && "label" in opt) {
-              const label = (opt as { label?: unknown }).label;
-              return { ...opt, label: typeof label === "string" ? label : String(label ?? "") };
-            }
-            return { label: String(opt) };
-          });
-          next.options = normalized;
-        }
-        return next;
-      });
-
-      return { ...base, questions } as FormSchema;
-    };
-
     let schema: FormSchema;
     try {
       const parsed = JSON.parse(questionsArg);
-      let shaped: FormSchema;
-      if (Array.isArray(parsed)) {
-        shaped = { questions: parsed } as FormSchema;
-      } else if (parsed && typeof parsed === "object" && !("questions" in (parsed as Record<string, unknown>))) {
-        const entries = Object.entries(parsed as Record<string, unknown>);
-        const questions = entries.map(([question, value]) => {
-          if (typeof value === "string") {
-            return { question, header: value };
-          }
-          if (value && typeof value === "object") {
-            return { question, ...(value as Record<string, unknown>) };
-          }
-          return { question };
-        });
-        shaped = { questions } as FormSchema;
-      } else {
-        shaped = parsed as FormSchema;
-      }
-      schema = normalizeQuestions(shaped);
+      schema = normalizeFormSchema(parsed);
     } catch {
       emitRunError("Invalid JSON in --questions");
       process.exit(1);

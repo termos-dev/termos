@@ -8,6 +8,5 @@
   "repository": "https://github.com/termos-dev/termos",
   "license": "MIT",
   "keywords": ["ide", "interactive", "terminal", "claude-code", "zellij", "tui"],
-  "commands": "./.claude-plugin/commands/",
-  "skills": "./.claude-plugin/skills/"
+  "commands": "./.claude-plugin/commands/"
 }

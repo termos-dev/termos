@@ -167,18 +167,19 @@ export const componentSchemas: Record<string, ComponentSchema> = {
 
   markdown: {
     name: "markdown",
-    description: "Render markdown file with scrolling",
+    description: "Render markdown content or file with scrolling",
     args: {
-      file: { type: "string", required: true, description: "Path to markdown file" },
+      file: { type: "string", description: "Path to markdown file" },
+      content: { type: "string", description: "Inline markdown content" },
       title: { type: "string", description: "Title above content" },
     },
     returns: {
       action: "accept",
-      file: "string - path to file",
+      file: "string - path to file (when using --file)",
     },
     examples: [
       'termos run --title "Markdown" markdown --file README.md',
-      'termos run --title "Markdown" markdown --file plan.md',
+      'termos run --title "Markdown" markdown --content "# Hello\\n\\n**Bold** text"',
     ],
   },
 

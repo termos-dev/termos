@@ -7,6 +7,9 @@ export {
   type FormSchema,
 } from "./schema.js";
 
+// Schema normalization
+export { normalizeFormSchema } from "./normalize-schema.js";
+
 // Protocol
 export {
   emitResult,

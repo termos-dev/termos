@@ -4,7 +4,7 @@ import { readFileSync, watchFile, unwatchFile } from 'fs';
 import { useTerminalSize, ScrollBar, useMouseScroll } from './shared/index.js';
 
 declare const onComplete: (result: unknown) => void;
-declare const args: { file?: string; title?: string };
+declare const args: { file?: string; content?: string; title?: string };
 
 // Simple markdown rendering
 function renderLine(line: string, idx: number) {
@@ -43,13 +43,21 @@ export default function MarkdownViewer() {
   const [lines, setLines] = useState<string[]>([]);
 
   const filePath = args?.file;
+  const inlineContent = args?.content;
   const title = args?.title || 'Markdown';
 
-  // Load and watch file
+  // Load content from inline or file
   useEffect(() => {
+    // Priority: inline content > file
+    if (inlineContent) {
+      setContent(inlineContent);
+      setLines(inlineContent.split('\n'));
+      return;
+    }
+
     if (!filePath) {
-      setContent('No file specified');
-      setLines(['No file specified']);
+      setContent('No content specified');
+      setLines(['No content. Use --file <path> or --content <markdown>']);
       return;
     }
 
@@ -68,7 +76,7 @@ export default function MarkdownViewer() {
     watchFile(filePath, { interval: 1000 }, loadFile);
 
     return () => unwatchFile(filePath);
-  }, [filePath]);
+  }, [filePath, inlineContent]);
 
   const visibleLines = Math.max(5, rows - 4);
   const maxScroll = Math.max(0, lines.length - visibleLines);

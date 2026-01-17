@@ -8,9 +8,9 @@ import {
   type FormSchema,
 } from "@termosdev/shared";
 import { findResultEvent } from "./events.js";
-import { ensureEventsFile, getSessionRuntimeDir, getHeartbeatPath } from "./runtime.js";
+import { ensureEventsFile, getSessionRuntimeDir } from "./runtime.js";
 import { type PaneHost, selectPaneHost, type PositionPreset } from "./pane-hosts.js";
-import { shellEscape } from "./shell-utils.js";
+import { shellEscape, loadShellTemplate, renderShellTemplate } from "./shell-utils.js";
 
 // ESM compatibility for __dirname
 const __filename = fileURLToPath(import.meta.url);
@@ -198,15 +198,10 @@ export class InteractionManager extends EventEmitter {
     const id = options.id ?? this.generateId();
     const eventsFile = this.getEventsFile();
     const pidFile = path.join(getSessionRuntimeDir(this.sessionName), `pid-${id}.txt`);
-    const heartbeatPath = getHeartbeatPath(this.sessionName);
     const env: Record<string, string> = {
       ...buildInteractionEnv(id, eventsFile),
       TERMOS_PID_FILE: pidFile,
     };
-    // Only pass heartbeat if file exists (managed session, not --stream mode)
-    if (fs.existsSync(heartbeatPath)) {
-      env.TERMOS_HEARTBEAT_FILE = heartbeatPath;
-    }
     const nodeBin = process.env.TERMOS_NODE || process.execPath || "node";
     const nodeCmd = shellEscape(nodeBin);
     const pidPrefix = 'if [ -n "$TERMOS_PID_FILE" ]; then echo $$ > "$TERMOS_PID_FILE"; fi';
@@ -237,66 +232,24 @@ export class InteractionManager extends EventEmitter {
     if (options.inkFile) {
       const resolvedPath = this.resolveInkFile(options.inkFile);
       const execPrefix = useExec ? "exec " : "";
-      command = `${pidPrefix}; ${execPrefix}${nodeCmd} "${this.inkRunnerPath}" --file '${shellEscape(resolvedPath)}'`;
-      if (options.title) command += ` --title '${shellEscape(options.title)}'`;
-      if (options.inkArgs) command += ` --args '${shellEscape(JSON.stringify(options.inkArgs))}'`;
+      // shellEscape already wraps in single quotes, so no extra quotes needed
+      command = `${pidPrefix}; ${execPrefix}${nodeCmd} "${this.inkRunnerPath}" --file ${shellEscape(resolvedPath)}`;
+      if (options.title) command += ` --title ${shellEscape(options.title)}`;
+      if (options.inkArgs) command += ` --args ${shellEscape(JSON.stringify(options.inkArgs))}`;
     } else if (options.schema) {
       const execPrefix = useExec ? "exec " : "";
-      command = `${pidPrefix}; ${execPrefix}${nodeCmd} "${this.inkRunnerPath}" --schema '${shellEscape(JSON.stringify(options.schema))}'`;
-      if (options.title) command += ` --title '${shellEscape(options.title)}'`;
+      // shellEscape already wraps in single quotes, so no extra quotes needed
+      command = `${pidPrefix}; ${execPrefix}${nodeCmd} "${this.inkRunnerPath}" --schema ${shellEscape(JSON.stringify(options.schema))}`;
+      if (options.title) command += ` --title ${shellEscape(options.title)}`;
     } else if (options.command) {
-      // Wrap command to write result to events file on exit or signal
-      const escapedEventsFile = shellEscape(eventsFile);
-      const escapedId = shellEscape(id);
-      command = [
-        pidPrefix,
-        `__events=${escapedEventsFile}`,
-        `__id=${escapedId}`,
-        "__sent=0",
-        "__emit() {",
-        "  action=$1",
-        "  result=$2",
-        "  if [ \"$__sent\" -eq 0 ]; then",
-        "    __sent=1",
-        "    if [ -n \"$result\" ]; then",
-        "      echo '{\"ts\":'$(date +%s000)',\"type\":\"result\",\"id\":\"'\"$__id\"'\",\"action\":\"'\"$action\"'\",\"result\":'\"$result\"'}' >> \"$__events\"",
-        "    else",
-        "      echo '{\"ts\":'$(date +%s000)',\"type\":\"result\",\"id\":\"'\"$__id\"'\",\"action\":\"'\"$action\"'\"}' >> \"$__events\"",
-        "    fi",
-        "  fi",
-        "}",
-        // Background heartbeat checker - exits shell if session ends
-        "__hb_pid=",
-        "if [ -n \"$TERMOS_HEARTBEAT_FILE\" ]; then",
-        "  (",
-        "    while true; do",
-        "      if [ ! -f \"$TERMOS_HEARTBEAT_FILE\" ]; then",
-        "        kill $$ 2>/dev/null; exit 0",
-        "      fi",
-        "      # Check file age using perl (cross-platform)",
-        "      __age=$(perl -e 'print time - (stat($ARGV[0]))[9]' \"$TERMOS_HEARTBEAT_FILE\" 2>/dev/null || echo 999)",
-        "      if [ \"$__age\" -gt 2 ]; then",
-        "        kill $$ 2>/dev/null; exit 0",
-        "      fi",
-        "      sleep 1",
-        "    done",
-        "  ) &",
-        "  __hb_pid=$!",
-        "fi",
-        "trap '__emit cancel; [ -n \"$__hb_pid\" ] && kill $__hb_pid 2>/dev/null' EXIT INT TERM HUP",
-        options.command,
-        "code=$?",
-        // Show exit notification and wait for user to acknowledge
-        "echo ''",
-        "if [ $code -eq 0 ]; then echo '✓ Command completed successfully'; else echo '✗ Command failed (exit code: '$code')'; fi",
-        "echo 'Files may have changed.'",
-        "echo ''",
-        "echo 'Press Enter to close...'",
-        "read __dummy",
-        "if [ $code -eq 0 ]; then __emit accept '{\"exitCode\":'$code'}'; else __emit decline '{\"exitCode\":'$code'}'; fi",
-        "[ -n \"$__hb_pid\" ] && kill $__hb_pid 2>/dev/null",
-        "trap - EXIT INT TERM HUP",
-      ].join("\n");
+      // Wrap command using shell template
+      const template = loadShellTemplate("command-wrapper");
+      command = renderShellTemplate(template, {
+        PID_PREFIX: pidPrefix,
+        EVENTS_FILE: shellEscape(eventsFile),
+        ID: shellEscape(id),
+        COMMAND: options.command,
+      });
     } else {
       throw new Error("Either schema, inkFile, or command is required");
     }
