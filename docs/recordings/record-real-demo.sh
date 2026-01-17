@@ -207,11 +207,12 @@ chmod +x /tmp/real-demo.sh
 
 echo "Recording component showcase demo..."
 
-# Record with proper terminal size
+# Record with proper terminal size (v2 format for player compatibility)
 asciinema rec \
     --overwrite \
     --cols 72 \
     --rows 20 \
+    -f asciicast-v2 \
     -c "/tmp/real-demo.sh" \
     hero-demo.cast
 

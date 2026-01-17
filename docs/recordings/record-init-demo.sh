@@ -148,11 +148,12 @@ chmod +x /tmp/init-demo.sh
 
 echo "Recording init wizard demo..."
 
-# Record
+# Record (v2 format for player compatibility)
 asciinema rec \
     --overwrite \
     --cols 80 \
     --rows 40 \
+    -f asciicast-v2 \
     -c "/tmp/init-demo.sh" \
     init-demo.cast
 
