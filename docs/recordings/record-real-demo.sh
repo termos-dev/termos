@@ -1,6 +1,6 @@
 #!/bin/bash
-# Real Termos Component Demo - Accurate visual reproduction
-# Shows what users actually see in termos panes
+# Real Termos Demo - Shows Claude + Termos interaction
+# Demonstrates how termos pops up while Claude is working
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -13,205 +13,109 @@ clear
 sleep 0.3
 
 # ============================================
-# DEMO 1: Confirm Component
+# Claude is running
 # ============================================
+printf "\033[0;90m~/my-project $\033[0m claude\n"
+sleep 0.5
 printf "\n"
-printf " \033[1;36mDeploy to production?\033[0m\n"
+printf "╭─────────────────────────────────────────────────────────────────╮\n"
+printf "│  \033[1mClaude Code\033[0m                                                   │\n"
+printf "╰─────────────────────────────────────────────────────────────────╯\n"
 printf "\n"
-printf " \033[7;32m Yes \033[0m  \033[0m No \033[0m\n"
+sleep 0.3
+
+printf "> Help me deploy this app to production\n"
 printf "\n"
-printf " \033[2my/n=quick select  ←→=switch  Enter=confirm  Esc=cancel\033[0m\n"
+sleep 0.8
+
+printf "\033[36m⠋\033[0m Analyzing deployment configuration...\n"
+sleep 0.5
+printf "\033[32m✓\033[0m Found Dockerfile and docker-compose.yml\n"
+sleep 0.3
+printf "\033[32m✓\033[0m Detected staging and production environments\n"
+sleep 0.3
+printf "\n"
+
+printf "\033[36m⠙\033[0m Building application...\n"
+sleep 0.6
+printf "\033[32m✓\033[0m Build complete (2.3s)\n"
+sleep 0.3
+printf "\033[32m✓\033[0m Tests passing (24/24)\n"
+printf "\n"
+sleep 0.5
+
+# Termos pops up
+printf "\033[1;33m◀ Termos:\033[0m Opening confirmation...\n"
+sleep 0.3
+printf "\n"
+printf "┌─────────────────────────────────────────────────────────────────┐\n"
+printf "│                                                                 │\n"
+printf "│  \033[1;36mDeploy to production?\033[0m                                        │\n"
+printf "│                                                                 │\n"
+printf "│  This will deploy commit \033[33mab3f2c1\033[0m to prod.example.com          │\n"
+printf "│                                                                 │\n"
+printf "│  \033[7;32m Yes \033[0m   No                                                   │\n"
+printf "│                                                                 │\n"
+printf "│  \033[2my/n = quick select\033[0m                                            │\n"
+printf "│                                                                 │\n"
+printf "└─────────────────────────────────────────────────────────────────┘\n"
+printf "\n"
 
 sleep 2
 
-# Show user pressing Y
-printf "\033[A\033[A\033[A"  # Move up
-printf "\r \033[1;36mDeploy to production?\033[0m\n"
+# User confirms
+printf "\033[1;32m◀ Termos:\033[0m User confirmed: \033[32mYes\033[0m\n"
 printf "\n"
-printf " \033[1;32m✓ Yes\033[0m\n"
-printf "\n"
-printf " \033[2mConfirmed\033[0m\n"
+sleep 0.5
 
-sleep 1.5
-clear
+printf "\033[36m⠹\033[0m Deploying to production...\n"
+sleep 0.4
 
-# ============================================
-# DEMO 2: Progress Component
-# ============================================
+# Progress popup
 printf "\n"
-printf " \033[1;36mDeployment\033[0m\033[2m (1/4)\033[0m\n"
+printf "\033[1;33m◀ Termos:\033[0m Showing progress...\n"
+sleep 0.2
 printf "\n"
-printf " \033[32m█████\033[0m\033[2m░░░░░░░░░░░░░░░\033[0m 25%%\n"
+printf "┌─────────────────────────────────────────────────────────────────┐\n"
+printf "│  \033[1;36mDeployment Progress\033[0m                                          │\n"
+printf "│                                                                 │\n"
+printf "│  \033[32m████████████████████\033[0m 100%%                                   │\n"
+printf "│                                                                 │\n"
+printf "│  \033[32m✓\033[0m Build application                                          │\n"
+printf "│  \033[32m✓\033[0m Run tests                                                  │\n"
+printf "│  \033[32m✓\033[0m Push to registry                                           │\n"
+printf "│  \033[32m✓\033[0m Deploy to production                                       │\n"
+printf "│                                                                 │\n"
+printf "│  \033[1;32mComplete!\033[0m                                                    │\n"
+printf "└─────────────────────────────────────────────────────────────────┘\n"
 printf "\n"
-printf " \033[32m✓\033[0m Build application\n"
-printf " \033[36m⠋\033[0m Run tests\n"
-printf " \033[2m○ Deploy to staging\033[0m\n"
-printf " \033[2m○ Deploy to production\033[0m\n"
-printf "\n"
-printf " \033[2mq=cancel\033[0m\n"
-
-sleep 1
-
-# Animate progress
-for step in 2 3 4; do
-    sleep 0.8
-    case $step in
-        2)
-            printf "\033[8A"  # Move up
-            printf " \033[1;36mDeployment\033[0m\033[2m (2/4)\033[0m\n"
-            printf "\n"
-            printf " \033[32m██████████\033[0m\033[2m░░░░░░░░░░\033[0m 50%%\n"
-            printf "\n"
-            printf " \033[32m✓\033[0m Build application\n"
-            printf " \033[32m✓\033[0m Run tests\n"
-            printf " \033[36m⠙\033[0m Deploy to staging\n"
-            printf " \033[2m○ Deploy to production\033[0m\n"
-            printf "\n"
-            printf " \033[2mq=cancel\033[0m\n"
-            ;;
-        3)
-            printf "\033[8A"
-            printf " \033[1;36mDeployment\033[0m\033[2m (3/4)\033[0m\n"
-            printf "\n"
-            printf " \033[32m███████████████\033[0m\033[2m░░░░░\033[0m 75%%\n"
-            printf "\n"
-            printf " \033[32m✓\033[0m Build application\n"
-            printf " \033[32m✓\033[0m Run tests\n"
-            printf " \033[32m✓\033[0m Deploy to staging\n"
-            printf " \033[36m⠹\033[0m Deploy to production\n"
-            printf "\n"
-            printf " \033[2mq=cancel\033[0m\n"
-            ;;
-        4)
-            printf "\033[8A"
-            printf " \033[1;36mDeployment\033[0m\033[2m (4/4)\033[0m\n"
-            printf "\n"
-            printf " \033[32m████████████████████\033[0m 100%%\n"
-            printf "\n"
-            printf " \033[32m✓\033[0m Build application\n"
-            printf " \033[32m✓\033[0m Run tests\n"
-            printf " \033[32m✓\033[0m Deploy to staging\n"
-            printf " \033[32m✓\033[0m Deploy to production\n"
-            printf "\n"
-            printf " \033[1;32mComplete!\033[0m\n"
-            ;;
-    esac
-done
-
-sleep 1.5
-clear
-
-# ============================================
-# DEMO 3: Checklist Component
-# ============================================
-printf "\n"
-printf " \033[1;36mSelect features\033[0m\033[2m (2/4 checked)\033[0m\n"
-printf "\n"
-printf " \033[7m\033[32m☑\033[0m\033[7m JWT Authentication\033[0m\n"
-printf " \033[32m☑\033[0m Rate limiting\n"
-printf " \033[2m☐\033[0m OAuth integration\n"
-printf " \033[2m☐\033[0m API versioning\n"
-printf "\n"
-printf "   [Done]\n"
-printf "\n"
-printf " \033[2mSpace=toggle  a=all  n=none  ↑↓=nav  Enter=done  q=cancel\033[0m\n"
 
 sleep 1.5
 
-# Show selection changes
-printf "\033[7A"
-printf " \033[1;36mSelect features\033[0m\033[2m (3/4 checked)\033[0m\n"
+printf "\033[32m✓\033[0m Deployed to \033[4mhttps://prod.example.com\033[0m\n"
 printf "\n"
-printf " \033[32m☑\033[0m JWT Authentication\n"
-printf " \033[32m☑\033[0m Rate limiting\n"
-printf " \033[7m\033[32m☑\033[0m\033[7m OAuth integration\033[0m\n"
-printf " \033[2m☐\033[0m API versioning\n"
-printf "\n"
-printf "   [Done]\n"
 
-sleep 1
+sleep 0.5
 
-# Move to Done
-printf "\033[6A"
-printf " \033[1;36mSelect features\033[0m\033[2m (3/4 checked)\033[0m\n"
-printf "\n"
-printf " \033[32m☑\033[0m JWT Authentication\n"
-printf " \033[32m☑\033[0m Rate limiting\n"
-printf " \033[32m☑\033[0m OAuth integration\n"
-printf " \033[2m☐\033[0m API versioning\n"
-printf "\n"
-printf " \033[7;32m  [Done]  \033[0m\n"
-
-sleep 1
-clear
-
-# ============================================
-# DEMO 4: Diff Component (simplified)
-# ============================================
-printf "\n"
-printf " \033[1;36msrc/auth.ts\033[0m\033[2m +12 -3\033[0m\n"
-printf "\n"
-printf " \033[2m│\033[0m \033[2m  1\033[0m   import { jwt } from 'jsonwebtoken';\n"
-printf " \033[2m│\033[0m \033[2m  2\033[0m   \n"
-printf " \033[32m│\033[0m \033[32m+ 3\033[0m \033[32m  const SECRET = process.env.JWT_SECRET;\033[0m\n"
-printf " \033[32m│\033[0m \033[32m+ 4\033[0m \033[32m  const EXPIRY = '7d';\033[0m\n"
-printf " \033[2m│\033[0m \033[2m  5\033[0m   \n"
-printf " \033[31m│\033[0m \033[31m- 6\033[0m \033[31m  export function verify(token) {\033[0m\n"
-printf " \033[32m│\033[0m \033[32m+ 6\033[0m \033[32m  export function verify(token: string) {\033[0m\n"
-printf " \033[32m│\033[0m \033[32m+ 7\033[0m \033[32m    return jwt.verify(token, SECRET);\033[0m\n"
-printf " \033[2m│\033[0m \033[2m  8\033[0m   }\n"
-printf "\n"
-printf " \033[7;32m Approve \033[0m  \033[0m Reject \033[0m\n"
-printf "\n"
-printf " \033[2my/n=quick  ←→=switch  e=edit  Enter=confirm\033[0m\n"
-
-sleep 2.5
-clear
-
-# ============================================
-# DEMO 5: Table Component
-# ============================================
-printf "\n"
-printf " \033[1;36mTest Results\033[0m\n"
-printf "\n"
-printf " \033[2m┌──────────┬───────┬────────┬────────┐\033[0m\n"
-printf " \033[2m│\033[0m Suite    \033[2m│\033[0m Tests \033[2m│\033[0m Passed \033[2m│\033[0m Failed \033[2m│\033[0m\n"
-printf " \033[2m├──────────┼───────┼────────┼────────┤\033[0m\n"
-printf " \033[2m│\033[0m auth     \033[2m│\033[0m    12 \033[2m│\033[0m \033[32m    12\033[0m \033[2m│\033[0m \033[32m     0\033[0m \033[2m│\033[0m\n"
-printf " \033[2m│\033[0m api      \033[2m│\033[0m    24 \033[2m│\033[0m \033[32m    23\033[0m \033[2m│\033[0m \033[31m     1\033[0m \033[2m│\033[0m\n"
-printf " \033[2m│\033[0m ui       \033[2m│\033[0m     8 \033[2m│\033[0m \033[32m     8\033[0m \033[2m│\033[0m \033[32m     0\033[0m \033[2m│\033[0m\n"
-printf " \033[2m└──────────┴───────┴────────┴────────┘\033[0m\n"
-printf "\n"
-printf " \033[2mq=close  ↑↓←→=scroll\033[0m\n"
-
-sleep 2.5
-clear
-
-# ============================================
-# Final Message
-# ============================================
-printf "\n"
-printf "\033[1;36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n"
+printf "───────────────────────────────────────────────────────────────────\n"
 printf "\n"
 printf "  \033[1mAutonomous, not absent.\033[0m\n"
+printf "  \033[2mClaude works. You stay in control.\033[0m\n"
 printf "\n"
-printf "  \033[2mClaude works. You decide.\033[0m\n"
-printf "\n"
-printf "\033[1;36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n"
-printf "\n"
+printf "───────────────────────────────────────────────────────────────────\n"
 
 sleep 3
 SCRIPT
 
 chmod +x /tmp/real-demo.sh
 
-echo "Recording component showcase demo..."
+echo "Recording Claude + Termos demo..."
 
-# Record with proper terminal size (v2 format for player compatibility)
+# Record (v2 format for player compatibility)
 asciinema rec \
     --overwrite \
     --cols 72 \
-    --rows 20 \
+    --rows 32 \
     -f asciicast-v2 \
     -c "/tmp/real-demo.sh" \
     hero-demo.cast
