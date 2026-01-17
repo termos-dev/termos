@@ -18,6 +18,7 @@ When Claude Code runs autonomously, you lose visibility and control. Termos lets
 
 ```bash
 npm install -g @termosdev/cli
+claude plugins add-marketplace github:termos-dev/termos
 claude plugins install termos
 ```
 

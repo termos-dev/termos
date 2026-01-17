@@ -349,7 +349,7 @@ async function handleRun(args: string[]): Promise<void> {
       editorCmd = `${editorCmd} "${filePath}"`;
     }
 
-    // Run as command mode
+    // Run with edit-wrapper (no "Press Enter" prompt) and closeOnExit
     ensureEventsFile(host.sessionName);
     const im = new InteractionManager({ cwd: process.cwd(), host });
     const id = await im.create({
@@ -359,6 +359,8 @@ async function handleRun(args: string[]): Promise<void> {
       position: position,
       component: "edit",
       isCommand: true,
+      closeOnExit: true,
+      wrapperTemplate: "edit-wrapper",
     });
 
     if (wait) {

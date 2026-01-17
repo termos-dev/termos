@@ -53,6 +53,8 @@ export interface CreateInteractionOptions {
   timeoutMs?: number;
   position?: PositionPreset;  // Position preset (floating, split, tab, etc.)
   heightPercent?: number;     // Override height (percentage of terminal)
+  closeOnExit?: boolean;      // Close pane when command exits (default: auto based on component type)
+  wrapperTemplate?: string;   // Override wrapper template (default: "command-wrapper")
 }
 
 interface InteractionManagerOptions {
@@ -243,7 +245,8 @@ export class InteractionManager extends EventEmitter {
       if (options.title) command += ` --title ${shellEscape(options.title)}`;
     } else if (options.command) {
       // Wrap command using shell template
-      const template = loadShellTemplate("command-wrapper");
+      const templateName = options.wrapperTemplate ?? "command-wrapper";
+      const template = loadShellTemplate(templateName);
       command = renderShellTemplate(template, {
         PID_PREFIX: pidPrefix,
         EVENTS_FILE: shellEscape(eventsFile),
@@ -256,7 +259,8 @@ export class InteractionManager extends EventEmitter {
 
     // Ephemeral: ink components and schema forms auto-close when done
     // Persistent: shell commands (-- <cmd>) stay visible for output review
-    const ephemeral = !!(options.inkFile || options.schema);
+    // Can be overridden with explicit closeOnExit option
+    const ephemeral = options.closeOnExit ?? !!(options.inkFile || options.schema);
 
     const paneName = getPaneName();
     await this.host.run(
