@@ -10,6 +10,7 @@ declare const args: {
   code?: string;
   title?: string;
   editor?: string; // e.g. "code", "vim", "nano"
+  'no-header'?: boolean; // Hide header when pane host shows title
 };
 
 interface FlowNode {
@@ -152,7 +153,10 @@ function renderFlowchartASCII(diagram: ParsedDiagram): string[] {
   if (nodes.length === 0) return ['(empty flowchart)'];
 
   const nodeMap = new Map(nodes.map(n => [n.id, n]));
-  const NODE_WIDTH = 16;
+  // Calculate width based on longest label (min 16, max 50 for readability)
+  const maxLabelLength = Math.max(...nodes.map(n => n.label.length));
+  const NODE_WIDTH = Math.min(50, Math.max(16, maxLabelLength + 4));
+  const MAX_LABEL_LENGTH = NODE_WIDTH - 4;
   const NODE_HEIGHT = 3;
   const H_SPACING = 4;
   const V_SPACING = 2;
@@ -212,8 +216,9 @@ function renderFlowchartASCII(diagram: ParsedDiagram): string[] {
     const levelNodes = levels[lvl];
     for (let idx = 0; idx < levelNodes.length; idx++) {
       const node = levelNodes[idx];
-      const label = node.label.length > NODE_WIDTH - 4
-        ? node.label.slice(0, NODE_WIDTH - 5) + '…'
+      // Truncate only if label exceeds max (for very long labels)
+      const label = node.label.length > MAX_LABEL_LENGTH
+        ? node.label.slice(0, MAX_LABEL_LENGTH - 1) + '…'
         : node.label;
       const width = Math.max(label.length + 4, 8);
 
@@ -455,14 +460,16 @@ export default function MermaidViewer() {
 
   return (
     <Box flexDirection="column">
-      <Box paddingX={1}>
-        <Text bold color="cyan">{title}</Text>
-        <Text dimColor> [{diagram?.type || 'unknown'}]</Text>
-        <Text dimColor> ({viewMode})</Text>
-        {showScrollBar && (
-          <Text dimColor> ({scroll + 1}-{Math.min(scroll + visibleLines, lines.length)}/{lines.length})</Text>
-        )}
-      </Box>
+      {!args?.['no-header'] && (
+        <Box paddingX={1}>
+          <Text bold color="cyan">{title}</Text>
+          <Text dimColor> [{diagram?.type || 'unknown'}]</Text>
+          <Text dimColor> ({viewMode})</Text>
+          {showScrollBar && (
+            <Text dimColor> ({scroll + 1}-{Math.min(scroll + visibleLines, lines.length)}/{lines.length})</Text>
+          )}
+        </Box>
+      )}
 
       <Box flexDirection="row">
         <Box flexDirection="column" paddingX={1} marginTop={1} flexGrow={1}>

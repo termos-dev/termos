@@ -8,6 +8,51 @@ Initialize termos.md with project-specific instructions and preferences.
 
 Generate a `termos.md` file in the project root with project-specific instructions tailored to the user's setup.
 
+## Step 0: Check for Existing termos.md
+
+Before starting the wizard, check if a `termos.md` file already exists:
+
+```bash
+if [ -f "termos.md" ]; then
+  echo "EXISTING_CONFIG=yes"
+  cat termos.md
+else
+  echo "EXISTING_CONFIG=no"
+fi
+```
+
+If `termos.md` exists, parse the current settings to use as defaults:
+
+### Parsing Rules
+
+1. **Editor**: Extract from yaml block under `## Editor`:
+   ```
+   editor: nvim  →  detected_editor="nvim"
+   ```
+
+2. **Interaction Style**: Look for keywords in `## Interaction Preferences`:
+   - "frequently" or "Proactive" → `proactive`
+   - "essential" or "Minimal" → `minimal`
+   - "important" or "Balanced" → `balanced`
+
+3. **Use Cases**: Check which subsections exist under `## When to Use Termos`:
+   - `### Confirmations` present → confirmations enabled
+   - `### Progress Tracking` present → multi-step tasks enabled
+   - `### Code Review` present → code review enabled
+   - `### Data Display` present → data display enabled
+   - `### Always-On Widgets` present → always-on widgets enabled
+   - `### Command Tabs` present → command output enabled
+
+4. **Feature Flags**: Check for section presence:
+   - `### Plan Mode` present → plan mode enabled
+   - `### Task Progress` present → task progress enabled
+   - `### User Engagement` present → user engagement enabled
+   - `### Live Git Diff` present → git diff enabled
+
+When showing questions, mark detected values as "(Current)" instead of "(Recommended)".
+
+---
+
 ## Step 1: Environment Detection & Explanation
 
 Check environment and explain to user:
@@ -77,7 +122,12 @@ Based on detection, explain the experience they'll get:
 
 ## Step 2: Ask User Preferences
 
-Use AskUserQuestion to gather preferences:
+Use AskUserQuestion to gather preferences.
+
+**If existing termos.md was detected in Step 0:**
+- Mark detected values as "(Current)" instead of "(Recommended)"
+- Pre-select current values as the default option
+- This lets users keep existing settings or change them
 
 ### Question 1: Preferred Editor
 Based on detected editors (from Step 1), ask which editor they prefer:
@@ -144,13 +194,8 @@ If user is in Zellij, ask if they want a persistent git diff pane:
 - **Yes (Recommended)**: Show live git diff in a split pane while coding
 - **No**: Skip git diff pane
 
-If yes, ask for update interval:
-- **1 second**: Real-time updates (higher CPU)
-- **2 seconds (Recommended)**: Good balance
-- **5 seconds**: Lower CPU usage
-
-This pane shows `git diff` output and updates automatically as files change.
-Command: `termos run --title "Git Diff" --position split:right code --watch-cmd "git diff --color=always" --interval 2000`
+This pane shows `git diff` output and updates continuously.
+Command: `termos run --title "Git Diff" --position split:right --cmd "watch -n5 -c 'git diff --color=always'"`
 
 ## Step 3: Generate termos.md
 
@@ -226,8 +271,8 @@ Example: `termos run --title "Quick Check" --position floating:bottom-right ask 
 
 ### Live Git Diff Pane (Zellij only)
 {if selected: Show live git diff in a split pane while coding:
-`termos run --title "Git Diff" --position split:right code --watch-cmd "git diff --color=always" --interval {interval}`
-This updates automatically every {interval}ms as you make changes.
+`termos run --title "Git Diff" --position split:right --cmd "watch -n5 -c 'git diff --color=always'"`
+This updates continuously as you make changes.
 Start this when beginning a coding session.}
 
 ## Component Preferences

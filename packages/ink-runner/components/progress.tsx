@@ -12,6 +12,7 @@ declare const args: {
   step?: string;       // current step (1-indexed)
   status?: string;     // status message
   stateFile?: string;  // file to watch for state updates
+  'no-header'?: boolean; // Hide header when pane host shows title
 };
 
 interface StepState {
@@ -108,10 +109,12 @@ export default function Progress() {
 
   return (
     <Box flexDirection="column" paddingX={1}>
-      <Box marginBottom={1}>
-        <Text bold color="cyan">{title}</Text>
-        <Text dimColor> ({completedCount}/{steps.length})</Text>
-      </Box>
+      {!args?.['no-header'] && (
+        <Box marginBottom={1}>
+          <Text bold color="cyan">{title}</Text>
+          <Text dimColor> ({completedCount}/{steps.length})</Text>
+        </Box>
+      )}
 
       {/* Progress bar */}
       <Box marginBottom={1}>

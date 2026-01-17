@@ -1,14 +1,12 @@
 #!/usr/bin/env node
 
 import * as fs from "fs";
-import * as os from "os";
 import * as path from "path";
 import { fileURLToPath } from "url";
 import { InteractionManager, type InteractionResult } from "./interaction-manager.js";
 import { ensureEventsFile, getEventsFilePath } from "./runtime.js";
 import { selectPaneHost, VALID_POSITIONS, type PositionPreset } from "./pane-hosts.js";
 import { generateFullHelp, componentSchemas, normalizeFormSchema, type FormSchema } from "@termosdev/shared";
-import { startCommandWatcher, type ParseMode } from "./command-watcher.js";
 import { getComponentHeight, rowsToPercent } from "./height-calculator.js";
 import { loadMergedInstructions } from "./instructions-loader.js";
 import { extractFlags } from "./arg-parser.js";
@@ -22,10 +20,10 @@ function showHelp(): void {
 termos - Interactive UI runner for Claude Code (Zellij, Ghostty, or macOS Terminal)
 
 Usage:
-  termos run --title <text> <component>            Run an Ink component (built-in or custom .tsx)
-  termos run --title <text> --cmd "<command>"      Run a shell command (recommended for agents)
-  termos run --title <text> --cmd-file <path>      Run a shell command from file
-  termos run --title <text> -- <command>           Run a shell command (passthrough)
+  termos run --title <text> --position <preset> <component>            Run an Ink component
+  termos run --title <text> --position <preset> --cmd "<command>"      Run a shell command
+  termos run --title <text> --position <preset> --cmd-file <path>      Run command from file
+  termos run --title <text> --position <preset> -- <command>           Run command (passthrough)
 
   termos wait <id> [--timeout <seconds>]           Wait for interaction result (default: 300s)
   termos result [<id>]                             Get result(s) - all if no ID provided
@@ -38,15 +36,10 @@ Options:
   --cmd "<string>"      Inline shell command (supports &&, |, ||, etc.)
   --cmd-file <path>     Read command from file
   --position <preset>   Pane position preset (required)
-                        Floating: floating, floating:center, floating:top-left, floating:top-right,
-                                  floating:bottom-left, floating:bottom-right
+                        Floating: floating, floating:center, floating:top-left, etc.
+                          Size modifiers: :small, :medium, :large (e.g., floating:center:large)
                         Split (Zellij): split, split:right, split:down
                         Tab: tab
-
-Live Data Options:
-  --watch-cmd "<cmd>"   Shell command to run periodically for live data
-  --interval <ms>       Refresh interval in milliseconds (default: 1000)
-  --parse <mode>        Output parsing: number | json | lines | raw | auto (default: auto)
 
   -h, --help            Show this help
 
@@ -58,6 +51,10 @@ Workflow:
 Examples:
   termos run --title "Confirm" --position floating confirm --prompt "Delete files?"
   termos wait interaction-1-123456789 --timeout 60
+
+Live Data (use shell's watch command):
+  termos run --title "Changes" --position floating --cmd "watch -n1 -c 'git diff --color=always'"
+  termos run --title "Logs" --position split:down --cmd "tail -f /var/log/app.log"
 `);
 
   const instructions = loadMergedInstructions(process.cwd());
@@ -83,9 +80,6 @@ async function handleRun(args: string[]): Promise<void> {
 
   let cmdValue: string | undefined;
   let cmdFileValue: string | undefined;
-  let watchCmdValue: string | undefined;
-  let intervalValue: number | undefined;
-  let parseValue: ParseMode | undefined;
   const builtinComponents: Record<string, string> = {
     "markdown": "markdown.tsx",
     "markdown.tsx": "markdown.tsx",
@@ -117,22 +111,12 @@ async function handleRun(args: string[]): Promise<void> {
     "gauge.tsx": "gauge.tsx",
   };
   // Extract flags using reusable parser
-  const flags = extractFlags(restArgs, [
-    { name: "title" },
-    { name: "position" },
-    { name: "cmd" },
-    { name: "cmd-file" },
-    { name: "watch-cmd" },
-    { name: "interval" },
-    { name: "parse" },
-  ]);
+  const knownCliFlags = ["title", "position", "cmd", "cmd-file"];
+  const flags = extractFlags(restArgs, knownCliFlags.map(name => ({ name })));
   title = flags.title;
   position = flags.position as PositionPreset | undefined;
   cmdValue = flags.cmd;
   cmdFileValue = flags["cmd-file"];
-  watchCmdValue = flags["watch-cmd"];
-  intervalValue = flags.interval ? parseInt(flags.interval, 10) : undefined;
-  parseValue = flags.parse as ParseMode | undefined;
 
   const sepIdx = restArgs.indexOf("--");
   const wait = hasWait;
@@ -140,15 +124,21 @@ async function handleRun(args: string[]): Promise<void> {
     console.log(JSON.stringify({ action: "cancel", error: message }));
   };
 
-  // Validate position is required
-  if (!position) {
-    emitRunError(`--position is required. Valid options: ${VALID_POSITIONS.join(", ")}`);
-    process.exit(1);
+  // Check for unknown CLI options (flags before component name or -- separator)
+  const firstArgIdx = restArgs.findIndex(arg => !arg.startsWith("--") || arg === "--");
+  for (let i = 0; i < (firstArgIdx === -1 ? restArgs.length : firstArgIdx); i++) {
+    const arg = restArgs[i];
+    if (arg.startsWith("--") && arg !== "--") {
+      const flagName = arg.slice(2).split("=")[0];
+      const validFlags = knownCliFlags.map(f => `--${f}`).join(", ");
+      emitRunError(`Unknown CLI option --${flagName}. Valid options: ${validFlags}`);
+      process.exit(1);
+    }
   }
 
-  // Validate position preset is valid
-  if (!VALID_POSITIONS.includes(position)) {
-    emitRunError(`Invalid position "${position}". Valid options: ${VALID_POSITIONS.join(", ")}`);
+  // Require --position
+  if (!position) {
+    emitRunError("--position is required.");
     process.exit(1);
   }
 
@@ -435,48 +425,6 @@ async function handleRun(args: string[]): Promise<void> {
     if (!Object.keys(inkArgs).length) inkArgs = undefined;
   }
 
-  // Handle --watch-cmd: set up command watcher with temp file
-  let watcherCleanup: (() => void) | undefined;
-  let tempFile: string | undefined;
-
-  if (watchCmdValue) {
-    tempFile = path.join(os.tmpdir(), `termos-watch-${Date.now()}.json`);
-
-    // Initialize with empty data
-    fs.writeFileSync(tempFile, JSON.stringify({ value: 0 }));
-
-    // Ensure inkArgs exists
-    if (!inkArgs) inkArgs = {};
-
-    // Override file arg to use temp file
-    inkArgs["file"] = tempFile;
-
-    // Start the watcher
-    watcherCleanup = startCommandWatcher({
-      cmd: watchCmdValue,
-      interval: intervalValue || 1000,
-      parse: parseValue || "auto",
-      outputFile: tempFile,
-      componentType: component,
-      componentArgs: inkArgs,
-      onError: (err) => {
-        console.error(`Watch command error: ${err.message}`);
-      },
-    });
-
-    // Clean up on exit
-    const cleanup = () => {
-      if (watcherCleanup) watcherCleanup();
-      if (tempFile) {
-        try { fs.unlinkSync(tempFile); } catch { /* ignore */ }
-      }
-    };
-
-    process.on("exit", cleanup);
-    process.on("SIGINT", () => { cleanup(); process.exit(0); });
-    process.on("SIGTERM", () => { cleanup(); process.exit(0); });
-  }
-
   // Validate component args against schema
   if (!isCommandMode && component) {
     const schema = componentSchemas[component];
@@ -487,12 +435,15 @@ async function handleRun(args: string[]): Promise<void> {
           return emitRunError(`Missing required argument: --${argName}`);
         }
       }
-      // Warn on unknown args
+      // Fail on unknown args for built-in components
       if (inkArgs) {
         const knownArgs = new Set(Object.keys(schema.args));
         for (const argName of Object.keys(inkArgs)) {
           if (!knownArgs.has(argName) && argName !== 'title') {
-            console.error(`Warning: Unknown argument --${argName} for component '${component}'`);
+            const validArgs = Array.from(knownArgs).map(a => `--${a}`).join(', ');
+            return emitRunError(
+              `Unknown argument --${argName} for component '${component}'. Valid args: ${validArgs}`
+            );
           }
         }
       }
@@ -523,11 +474,7 @@ async function handleRun(args: string[]): Promise<void> {
     heightPercent,
   });
 
-  // When using --watch-cmd, we must wait for the component to finish
-  // so we can keep updating the temp file
-  const shouldWait = wait || !!watchCmdValue;
-
-  if (shouldWait) {
+  if (wait) {
     const result = await new Promise<InteractionResult>(resolve => {
       im.on("interactionComplete", (iid: string, r: InteractionResult) => { if (iid === id) resolve(r); });
     });

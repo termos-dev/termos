@@ -158,7 +158,7 @@ export async function runSplitPane(
   sessionName?: string
 ): Promise<void> {
   const direction = options.direction ?? getOptimalSplitDirection();
-  const args = ["run", "--direction", direction, "--stacked"];
+  const args = ["run", "--direction", direction];
 
   if (options.closeOnExit) args.push("--close-on-exit");
   if (options.name) args.push("--name", options.name);

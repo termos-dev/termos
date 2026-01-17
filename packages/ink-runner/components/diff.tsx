@@ -12,6 +12,7 @@ declare const args: {
   before?: string;   // compare two files
   after?: string;
   title?: string;
+  'no-header'?: boolean; // Hide header when pane host shows title
 };
 
 interface DiffLine {
@@ -210,14 +211,16 @@ export default function DiffViewer() {
 
   return (
     <Box flexDirection="column">
-      <Box paddingX={1}>
-        <Text bold color="cyan">{title}</Text>
-        <Text color="green"> +{stats.additions}</Text>
-        <Text color="red"> -{stats.deletions}</Text>
-        {showScrollBar && (
-          <Text dimColor> ({scroll + 1}-{Math.min(scroll + visibleLines, lines.length)}/{lines.length})</Text>
-        )}
-      </Box>
+      {!args?.['no-header'] && (
+        <Box paddingX={1}>
+          <Text bold color="cyan">{title}</Text>
+          <Text color="green"> +{stats.additions}</Text>
+          <Text color="red"> -{stats.deletions}</Text>
+          {showScrollBar && (
+            <Text dimColor> ({scroll + 1}-{Math.min(scroll + visibleLines, lines.length)}/{lines.length})</Text>
+          )}
+        </Box>
+      )}
 
       <Box flexDirection="row">
         <Box flexDirection="column" paddingX={1} flexGrow={1}>

@@ -12,6 +12,7 @@ declare const args: {
   columns?: string;   // comma-separated column names
   title?: string;
   select?: string;    // "true" to enable row selection
+  'no-header'?: boolean; // Hide header when pane host shows title
 };
 
 type Row = Record<string, unknown>;
@@ -38,7 +39,20 @@ function parseCSV(content: string): Row[] {
 function parseJSON(content: string): Row[] {
   const data = JSON.parse(content);
   if (Array.isArray(data)) return data;
-  if (typeof data === 'object' && data !== null) return [data];
+  if (typeof data === 'object' && data !== null) {
+    // Support {headers, rows} format - transform to array-of-objects
+    if (Array.isArray(data.headers) && Array.isArray(data.rows)) {
+      const headers = data.headers as string[];
+      return (data.rows as unknown[][]).map(row => {
+        const obj: Row = {};
+        headers.forEach((h, i) => {
+          obj[h] = row[i] ?? '';
+        });
+        return obj;
+      });
+    }
+    return [data];
+  }
   return [];
 }
 
@@ -207,12 +221,14 @@ export default function TableViewer() {
 
   return (
     <Box flexDirection="column">
-      <Box paddingX={1}>
-        <Text dimColor>{title} ({rows.length} rows)</Text>
-        {showScrollBar && (
-          <Text dimColor> [{scroll + 1}-{Math.min(scroll + visibleRows, rows.length)}]</Text>
-        )}
-      </Box>
+      {!args?.['no-header'] && (
+        <Box paddingX={1}>
+          <Text dimColor>{title} ({rows.length} rows)</Text>
+          {showScrollBar && (
+            <Text dimColor> [{scroll + 1}-{Math.min(scroll + visibleRows, rows.length)}]</Text>
+          )}
+        </Box>
+      )}
 
       <Box flexDirection="row">
         <Box flexDirection="column" paddingX={1} flexGrow={1}>

@@ -4,7 +4,7 @@ import { readFileSync } from 'fs';
 import { useTerminalSize, ScrollBar, useMouseScroll, useFileWatch } from './shared/index.js';
 
 declare const onComplete: (result: unknown) => void;
-declare const args: { file?: string; content?: string; title?: string };
+declare const args: { file?: string; content?: string; title?: string; 'no-header'?: boolean };
 
 // Simple markdown rendering
 function renderLine(line: string, idx: number) {
@@ -105,12 +105,14 @@ export default function MarkdownViewer() {
 
   return (
     <Box flexDirection="column">
-      <Box paddingX={1}>
-        <Text bold color="cyan">{title}</Text>
-        {showScrollBar && (
-          <Text dimColor> ({scroll + 1}-{Math.min(scroll + visibleLines, lines.length)}/{lines.length})</Text>
-        )}
-      </Box>
+      {!args?.['no-header'] && (
+        <Box paddingX={1}>
+          <Text bold color="cyan">{title}</Text>
+          {showScrollBar && (
+            <Text dimColor> ({scroll + 1}-{Math.min(scroll + visibleLines, lines.length)}/{lines.length})</Text>
+          )}
+        </Box>
+      )}
 
       <Box flexDirection="row">
         <Box flexDirection="column" paddingX={1} flexGrow={1}>

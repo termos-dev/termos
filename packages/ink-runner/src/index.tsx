@@ -13,6 +13,7 @@ interface CliArgs {
   title?: string;
   help?: boolean;
   noSandbox?: boolean;
+  noHeader?: boolean;  // Hide component header (when pane host shows title)
   args?: string;  // JSON string of args to pass to component
 }
 
@@ -33,6 +34,8 @@ function parseArgs(): CliArgs {
       result.title = cliArgs[++i];
     } else if (arg === "--no-sandbox") {
       result.noSandbox = true;
+    } else if (arg === "--no-header") {
+      result.noHeader = true;
     } else if (arg === "--args" || arg === "-a") {
       result.args = cliArgs[++i];
     }
@@ -150,6 +153,10 @@ async function main(): Promise<void> {
 
     // Sandbox disabled by default on Linux due to Node.js permission assertion bug
     const defaultSandboxEnabled = process.platform !== "linux" && !args.noSandbox;
+    // Add noHeader to componentArgs if set
+    if (args.noHeader) {
+      componentArgs['no-header'] = true;
+    }
     await runFromFile({
       filePath: args.file,
       title: args.title,

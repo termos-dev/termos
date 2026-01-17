@@ -52,6 +52,7 @@ export interface MacOSTerminalCommandOptions {
   cwd?: string;
   name?: string;
   closeOnExit?: boolean;
+  skipCloseNote?: boolean;  // Skip adding any close message/prompt (when wrapper handles it)
 }
 
 /**
@@ -67,7 +68,12 @@ export function buildMacOSTerminalCommand(
   const name = options.name ?? "termos";
   const clearCommand = `printf '\\033[3J\\033[H\\033[2J'`;
   const titleCommand = `printf '\\033]0;termos:${name}\\007'`;
-  const closeNote = options.closeOnExit
+  // skipCloseNote: command wrapper handles its own close prompt
+  // closeOnExit: just show message, no wait
+  // otherwise: show prompt and wait for Enter
+  const closeNote = options.skipCloseNote
+    ? ""
+    : options.closeOnExit
     ? `; printf '\\n[termos] Pane closed. Please close this tab/window.\\n'`
     : `; printf '\\n[termos] Press Enter to close...\\n'; read _`;
   return buildShellCommand(

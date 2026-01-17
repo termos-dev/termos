@@ -14,6 +14,7 @@ declare const args: {
   editor?: string; // e.g. "code --goto", "vim +{line}", "nano" (external/detached mode)
   embeddedEditor?: string; // TUI editor command for in-pane editing, e.g. "nvim +{line}", "hx {file}:{line}"
   actionFile?: string; // temp file path for action (used in embedded mode)
+  'no-header'?: boolean; // Hide header when pane host shows title
 };
 
 // Simple syntax highlighting patterns
@@ -257,13 +258,15 @@ export default function CodeViewer() {
 
   return (
     <Box flexDirection="column">
-      <Box paddingX={1}>
-        <Text bold color="cyan">{title}</Text>
-        <Text dimColor> [{lang}]</Text>
-        {showScrollBar && (
-          <Text dimColor> ({scroll + 1}-{Math.min(scroll + visibleLines, lines.length)}/{lines.length})</Text>
-        )}
-      </Box>
+      {!args?.['no-header'] && (
+        <Box paddingX={1}>
+          <Text bold color="cyan">{title}</Text>
+          <Text dimColor> [{lang}]</Text>
+          {showScrollBar && (
+            <Text dimColor> ({scroll + 1}-{Math.min(scroll + visibleLines, lines.length)}/{lines.length})</Text>
+          )}
+        </Box>
+      )}
 
       <Box flexDirection="row">
         <Box flexDirection="column" paddingX={1} flexGrow={1}>

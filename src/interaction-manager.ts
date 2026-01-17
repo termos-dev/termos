@@ -237,12 +237,14 @@ export class InteractionManager extends EventEmitter {
       // shellEscape already wraps in single quotes, so no extra quotes needed
       command = `${pidPrefix}; ${execPrefix}${nodeCmd} "${this.inkRunnerPath}" --file ${shellEscape(resolvedPath)}`;
       if (options.title) command += ` --title ${shellEscape(options.title)}`;
+      if (this.host.showsPaneTitle) command += ` --no-header`;
       if (options.inkArgs) command += ` --args ${shellEscape(JSON.stringify(options.inkArgs))}`;
     } else if (options.schema) {
       const execPrefix = useExec ? "exec " : "";
       // shellEscape already wraps in single quotes, so no extra quotes needed
       command = `${pidPrefix}; ${execPrefix}${nodeCmd} "${this.inkRunnerPath}" --schema ${shellEscape(JSON.stringify(options.schema))}`;
       if (options.title) command += ` --title ${shellEscape(options.title)}`;
+      if (this.host.showsPaneTitle) command += ` --no-header`;
     } else if (options.command) {
       // Wrap command using shell template
       const templateName = options.wrapperTemplate ?? "command-wrapper";
@@ -257,10 +259,17 @@ export class InteractionManager extends EventEmitter {
       throw new Error("Either schema, inkFile, or command is required");
     }
 
-    // Ephemeral: ink components and schema forms auto-close when done
-    // Persistent: shell commands (-- <cmd>) stay visible for output review
+    // For command mode with a wrapper template, the wrapper handles its own "Press Enter to close"
+    // prompt and waits for user input before exiting. The pane should close after Exit.
+    const usesCommandWrapper = !!(options.command && !options.wrapperTemplate?.includes("edit"));
+
+    // Ephemeral (close on exit):
+    // - Ink components and schema forms auto-close when done
+    // - Command wrapper mode: wrapper waits for Enter, then pane closes
+    // Persistent (stay open):
+    // - Edit wrapper: editor exits immediately, user may want to see context
     // Can be overridden with explicit closeOnExit option
-    const ephemeral = options.closeOnExit ?? !!(options.inkFile || options.schema);
+    const ephemeral = options.closeOnExit ?? !!(options.inkFile || options.schema || usesCommandWrapper);
 
     const paneName = getPaneName();
     await this.host.run(
@@ -271,6 +280,7 @@ export class InteractionManager extends EventEmitter {
         position: options.position ?? "floating",
         closeOnExit: ephemeral,
         heightPercent: options.heightPercent,
+        skipCloseNote: usesCommandWrapper,
       },
       env
     );

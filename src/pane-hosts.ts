@@ -9,7 +9,8 @@ import { shellEscape, buildMacOSTerminalCommand } from "./shell-utils.js";
 
 const execFileAsync = promisify(execFile);
 
-export type PositionPreset =
+// Base position presets (without size modifiers)
+export type BasePosition =
   | "floating"
   | "floating:center"
   | "floating:top-left"
@@ -21,7 +22,13 @@ export type PositionPreset =
   | "split:down"
   | "tab";
 
-export const VALID_POSITIONS: PositionPreset[] = [
+// Size modifiers for floating positions
+export type SizeModifier = "small" | "medium" | "large";
+
+// PositionPreset can now be a base position or base:size (e.g., "floating:center:large")
+export type PositionPreset = string;
+
+const BASE_POSITIONS: BasePosition[] = [
   "floating",
   "floating:center",
   "floating:top-left",
@@ -34,14 +41,128 @@ export const VALID_POSITIONS: PositionPreset[] = [
   "tab",
 ];
 
-const FLOATING_PRESETS: Record<string, { x: string; y: string; width: string; height: string }> = {
-  "floating":              { x: "68%", y: "5%",  width: "30%", height: "40%" },
-  "floating:center":       { x: "35%", y: "30%", width: "30%", height: "40%" },
-  "floating:top-left":     { x: "2%",  y: "5%",  width: "30%", height: "40%" },
-  "floating:top-right":    { x: "68%", y: "5%",  width: "30%", height: "40%" },
-  "floating:bottom-left":  { x: "2%",  y: "55%", width: "30%", height: "40%" },
-  "floating:bottom-right": { x: "68%", y: "55%", width: "30%", height: "40%" },
+// For backwards compatibility, export common positions
+export const VALID_POSITIONS: string[] = [
+  ...BASE_POSITIONS,
+  // Also include common size combinations for documentation
+  "floating:small", "floating:medium", "floating:large",
+  "floating:center:small", "floating:center:medium", "floating:center:large",
+];
+
+// Size presets: small (current default), medium, large
+const SIZE_PRESETS: Record<SizeModifier, { width: string; height: string }> = {
+  small:  { width: "30%", height: "40%" },
+  medium: { width: "45%", height: "55%" },
+  large:  { width: "60%", height: "70%" },
 };
+
+// Base floating geometry (x, y positions only - size comes from SIZE_PRESETS)
+const FLOATING_BASE: Record<string, { x: string; y: string }> = {
+  "floating":              { x: "68%", y: "5%" },
+  "floating:center":       { x: "27%", y: "22%" },  // Adjusted for centered look with different sizes
+  "floating:top-left":     { x: "2%",  y: "5%" },
+  "floating:top-right":    { x: "68%", y: "5%" },
+  "floating:bottom-left":  { x: "2%",  y: "55%" },
+  "floating:bottom-right": { x: "68%", y: "55%" },
+};
+
+// Legacy FLOATING_PRESETS for backwards compatibility (uses small size)
+const FLOATING_PRESETS: Record<string, { x: string; y: string; width: string; height: string }> = {
+  "floating":              { ...FLOATING_BASE["floating"], ...SIZE_PRESETS.small },
+  "floating:center":       { x: "35%", y: "30%", ...SIZE_PRESETS.small },
+  "floating:top-left":     { ...FLOATING_BASE["floating:top-left"], ...SIZE_PRESETS.small },
+  "floating:top-right":    { ...FLOATING_BASE["floating:top-right"], ...SIZE_PRESETS.small },
+  "floating:bottom-left":  { ...FLOATING_BASE["floating:bottom-left"], ...SIZE_PRESETS.small },
+  "floating:bottom-right": { ...FLOATING_BASE["floating:bottom-right"], ...SIZE_PRESETS.small },
+};
+
+export interface ParsedPosition {
+  type: "floating" | "split" | "tab";
+  base: string;
+  size?: SizeModifier;
+  geometry?: { x: string; y: string; width: string; height: string };
+  splitDirection?: "right" | "down";
+}
+
+/**
+ * Parse a position string like "floating:center:large" into its components
+ */
+export function parsePosition(position: string): ParsedPosition {
+  // Handle tab
+  if (position === "tab") {
+    return { type: "tab", base: "tab" };
+  }
+
+  // Handle split positions
+  if (position.startsWith("split")) {
+    let direction: "right" | "down" | undefined;
+    if (position === "split:right") direction = "right";
+    else if (position === "split:down") direction = "down";
+    return { type: "split", base: position, splitDirection: direction };
+  }
+
+  // Handle floating positions with optional size modifier
+  // Format: floating[:location][:size]
+  // Examples: "floating", "floating:center", "floating:center:large", "floating:large"
+  const parts = position.split(":");
+  const sizeModifiers: SizeModifier[] = ["small", "medium", "large"];
+
+  let basePosition = "floating";
+  let size: SizeModifier = "small"; // Default size
+
+  if (parts.length === 1) {
+    // "floating"
+    basePosition = "floating";
+  } else if (parts.length === 2) {
+    // "floating:center" or "floating:large"
+    if (sizeModifiers.includes(parts[1] as SizeModifier)) {
+      basePosition = "floating";
+      size = parts[1] as SizeModifier;
+    } else {
+      basePosition = position; // "floating:center"
+    }
+  } else if (parts.length === 3) {
+    // "floating:center:large"
+    basePosition = `${parts[0]}:${parts[1]}`;
+    if (sizeModifiers.includes(parts[2] as SizeModifier)) {
+      size = parts[2] as SizeModifier;
+    }
+  }
+
+  // Get base geometry (position) - fall back to default floating if not found
+  const baseGeom = FLOATING_BASE[basePosition] ?? FLOATING_BASE["floating"];
+  const sizeGeom = SIZE_PRESETS[size];
+
+  // For center position, adjust x/y based on size for true centering
+  let x = baseGeom.x;
+  let y = baseGeom.y;
+  if (basePosition === "floating:center") {
+    // Calculate centered position based on size
+    const widthNum = parseInt(sizeGeom.width);
+    const heightNum = parseInt(sizeGeom.height);
+    x = `${Math.round((100 - widthNum) / 2)}%`;
+    y = `${Math.round((100 - heightNum) / 2)}%`;
+  }
+
+  return {
+    type: "floating",
+    base: basePosition,
+    size,
+    geometry: { x, y, ...sizeGeom },
+  };
+}
+
+/**
+ * Validate a position string
+ */
+export function isValidPosition(position: string): boolean {
+  if (position === "tab") return true;
+  if (position.startsWith("split")) {
+    return ["split", "split:right", "split:down"].includes(position);
+  }
+  // For floating, just check it starts with "floating"
+  return position.startsWith("floating");
+}
 
 export interface PaneRunOptions {
   name?: string;
@@ -49,12 +170,14 @@ export interface PaneRunOptions {
   position?: PositionPreset;
   closeOnExit?: boolean;
   heightPercent?: number;  // Override height (percentage of terminal)
+  skipCloseNote?: boolean; // Skip adding close message/prompt (when wrapper handles it)
 }
 
 export interface PaneHost {
   kind: "zellij" | "ghostty" | "mac-terminal";
   sessionName: string;
   supportsGeometry: boolean;
+  showsPaneTitle: boolean;  // true if host shows title bar above content (Zellij only)
   run(command: string, options: PaneRunOptions, env?: Record<string, string>): Promise<void>;
   close?(name?: string): Promise<void>;
 }
@@ -106,30 +229,26 @@ function createZellijHost(sessionName: string): PaneHost {
     kind: "zellij",
     sessionName,
     supportsGeometry: true,
+    showsPaneTitle: true,  // Zellij shows pane title bar directly above content
     async run(command, options, env) {
       const position = options.position ?? "floating";
+      const parsed = parsePosition(position);
 
-      if (position === "tab") {
-        // Pass sessionName to target the correct Zellij session
+      if (parsed.type === "tab") {
         await runTab(command, { name: options.name, cwd: options.cwd }, env, sessionName);
-      } else if (position.startsWith("split")) {
-        let direction: "right" | "down" | undefined;
-        if (position === "split:right") direction = "right";
-        else if (position === "split:down") direction = "down";
-        // else "split" uses auto-detection
+      } else if (parsed.type === "split") {
         await runSplitPane(command, {
           name: options.name,
           cwd: options.cwd,
           closeOnExit: options.closeOnExit,
-          direction: direction ?? getOptimalSplitDirection(),
+          direction: parsed.splitDirection ?? getOptimalSplitDirection(),
         }, env, sessionName);
       } else {
-        // floating presets
-        const geometry = FLOATING_PRESETS[position] ?? FLOATING_PRESETS["floating"];
+        // Floating with size support
+        const geometry = parsed.geometry!;
         const effectiveHeight = options.heightPercent
           ? String(options.heightPercent)
           : geometry.height;
-        // Pass sessionName to target the correct Zellij session
         await runFloatingPane(command, {
           name: options.name,
           cwd: options.cwd,
@@ -149,6 +268,7 @@ function createGhosttyHost(sessionName: string): PaneHost {
     kind: "ghostty",
     sessionName,
     supportsGeometry: false,
+    showsPaneTitle: false,  // Window title is separate (centered), no visual overlap
     async close(name?: string) {
       if (!name) return;
       // Close Ghostty window by title using AppleScript
@@ -169,7 +289,10 @@ end tell`;
     },
     async run(command, options, env) {
       const name = options.name ?? "termos";
-      const shellCommand = buildMacOSTerminalCommand(command, options, env);
+      const shellCommand = buildMacOSTerminalCommand(command, {
+        ...options,
+        name,
+      }, env);
       // Write to temp file with shebang and execute it using user's shell
       const tmpFile = `/tmp/termos-${Date.now()}.sh`;
       const userShell = process.env.SHELL || "/bin/sh";
@@ -194,6 +317,7 @@ function createMacTerminalHost(sessionName: string): PaneHost {
     kind: "mac-terminal",
     sessionName,
     supportsGeometry: false,
+    showsPaneTitle: false,  // Tab title is separate, helps identify
     async close(name?: string) {
       if (!name) return;
       // Close Terminal tab by custom title using AppleScript
@@ -216,7 +340,10 @@ end tell`;
     },
     async run(command, options, env) {
       const name = options.name ?? "termos";
-      const shellCommand = buildMacOSTerminalCommand(command, options, env);
+      const shellCommand = buildMacOSTerminalCommand(command, {
+        ...options,
+        name,
+      }, env);
       const scriptLines = [
         "tell application \"Terminal\"",
         "activate",

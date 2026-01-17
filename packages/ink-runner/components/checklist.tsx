@@ -8,6 +8,7 @@ declare const args: {
   items?: string;  // comma-separated
   options?: string;  // alias for items
   checked?: string; // comma-separated indices, e.g. "0,2"
+  'no-header'?: boolean; // Hide header when pane host shows title
 };
 
 interface Item {
@@ -152,13 +153,15 @@ export default function Checklist() {
 
   return (
     <Box flexDirection="column" paddingX={1}>
-      <Box marginBottom={1}>
-        <Text bold color="cyan">{title}</Text>
-        <Text dimColor> ({checkedCount}/{items.length} checked)</Text>
-        {showScrollBar && (
-          <Text dimColor> ({scroll + 1}-{Math.min(scroll + visibleLines, items.length)}/{items.length})</Text>
-        )}
-      </Box>
+      {!args?.['no-header'] && (
+        <Box marginBottom={1}>
+          <Text bold color="cyan">{title}</Text>
+          <Text dimColor> ({checkedCount}/{items.length} checked)</Text>
+          {showScrollBar && (
+            <Text dimColor> ({scroll + 1}-{Math.min(scroll + visibleLines, items.length)}/{items.length})</Text>
+          )}
+        </Box>
+      )}
 
       <Box flexDirection="row">
         <Box flexDirection="column" flexGrow={1}>
