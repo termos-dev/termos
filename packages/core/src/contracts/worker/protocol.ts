@@ -295,13 +295,76 @@ export const DeviceChatPollPayloadSchema = Type.Object({
  * gateway's secret proxy at `base_url` can resolve — the worker never holds a
  * real provider key at either hop.
  */
+/**
+ * Base64 length of the largest image one turn may carry.
+ *
+ * The byte cap itself lives with the producer that enforces it
+ * (`MAX_TURN_IMAGE_BYTES`, 5 MiB, in the server's `agent-turn-attachments.ts`);
+ * this is the same number expressed in the units the wire field is measured
+ * in, so the schema can reject an oversized payload without importing the
+ * server into the contract package.
+ */
+const MAX_TURN_IMAGE_BASE64_CHARS = Math.ceil((5 * 1024 * 1024) / 3) * 4;
+
 export const AgentTurnPollPayloadSchema = Type.Object({
   turn: Type.Object({
     agent_id: Type.String({ minLength: 1 }),
     conversation_id: Type.String({ minLength: 1 }),
     message_id: Type.String({ minLength: 1 }),
-    /** What the human said, verbatim. */
+    /** What the human said, verbatim. May be empty when the turn is attachments only. */
     message_text: Type.String({ maxLength: 32_000 }),
+    /**
+     * Image attachments of THIS message, already resolved to bytes by the
+     * gateway and inlined here as base64.
+     *
+     * They are inlined rather than referenced because the guest must never
+     * fetch an attachment: the producer reads each one out of the artifact
+     * store by the artifact id the gateway itself minted for this message, so
+     * the bytes the model sees are bytes Lobu already owns, and no attachment
+     * URL — signed or not — ever crosses into the isolate. Bounded per image
+     * and in total by the producer; an attachment over the bound is dropped
+     * with a log line rather than truncated, exactly as the subprocess lane
+     * skips an oversized image.
+     *
+     * The bounds here RESTATE the producer's own caps
+     * (`agent-turn-attachments.ts`: 8 images, 5 MiB each) so the contract is
+     * checkable on its own rather than only as a property of the one producer
+     * that writes it. `maxLength` is the base64 length of a capped image —
+     * 4 characters per 3 bytes, rounded up to the padded quantum.
+     */
+    message_images: Type.Optional(
+      Type.Array(
+        Type.Object({
+          /** `image/png`, `image/jpeg`, … — the artifact's own stored content type. */
+          mime_type: Type.String({ minLength: 1, maxLength: 128 }),
+          /** The artifact's bytes, base64. */
+          data: Type.String({
+            minLength: 1,
+            maxLength: MAX_TURN_IMAGE_BASE64_CHARS,
+          }),
+        }),
+        { maxItems: 8 }
+      )
+    ),
+    /**
+     * The message's NON-IMAGE attachments, as metadata only.
+     *
+     * The subprocess lane does not send these to the model either — it writes
+     * them into the worker's `input/` directory and names them in the prompt.
+     * This lane has no such directory, so it carries the same names and types
+     * and says so in the prompt; the bytes are deliberately absent, and this
+     * field must not be read as a general file capability.
+     */
+    message_files: Type.Optional(
+      Type.Array(
+        Type.Object({
+          name: Type.String({ minLength: 1, maxLength: 512 }),
+          mime_type: Type.String({ minLength: 1, maxLength: 128 }),
+          size: Type.Optional(Type.Integer({ minimum: 0 })),
+        }),
+        { maxItems: 32 }
+      )
+    ),
     system_prompt: Type.String(),
     /** The transcript this turn continues, oldest first, in pi's message shape. */
     messages: Type.Array(Type.Record(Type.String(), Type.Unknown())),
@@ -315,6 +378,20 @@ export const AgentTurnPollPayloadSchema = Type.Object({
       /** The gateway's agent-scoped secret-proxy base URL. */
       base_url: Type.String({ minLength: 1 }),
       max_tokens: Type.Optional(Type.Integer({ minimum: 1 })),
+      /**
+       * The modalities this model accepts, in pi-ai's own `Model.input`
+       * vocabulary and resolved from pi-ai's model registry — NOT guessed
+       * here. pi reads it to decide whether an image survives to the wire: a
+       * model without `"image"` has every image block replaced by
+       * "(image omitted: model does not support images)" before the request is
+       * built, which is what a non-vision model must get. Absent →
+       * the guest assumes text only.
+       */
+      input: Type.Optional(
+        Type.Array(Type.Union([Type.Literal("text"), Type.Literal("image")]), {
+          minItems: 1,
+        })
+      ),
     }),
     /**
      * Tools the turn may call. Each is an MCP tool the gateway proxies, reached
@@ -337,10 +414,11 @@ export const AgentTurnPollPayloadSchema = Type.Object({
           })
         ),
         /**
-         * The guest's own workspace tools the agent's tool policy admits. They
-         * run against a per-turn in-memory filesystem inside the isolate:
-         * `bash` is just-bash, the rest are pi's file tools over the same
-         * filesystem. Absent or empty → no workspace tools.
+         * The guest's own workspace tools the agent's tool policy admits — the
+         * same seven pi builtins the subprocess lane hardens. They run against
+         * a per-turn in-memory filesystem inside the isolate: `bash` is
+         * just-bash, the rest are pi's file tools over the same filesystem.
+         * Absent or empty → no workspace tools.
          */
         builtin: Type.Optional(
           Type.Array(
@@ -348,10 +426,22 @@ export const AgentTurnPollPayloadSchema = Type.Object({
               Type.Literal("bash"),
               Type.Literal("read"),
               Type.Literal("write"),
+              Type.Literal("edit"),
+              Type.Literal("grep"),
               Type.Literal("ls"),
               Type.Literal("find"),
             ])
           )
+        ),
+        /**
+         * Present when the conversation is pinned to a remote runtime sandbox.
+         * `bash` then runs there — the host posts each command to the gateway's
+         * `/internal/runtime/exec` with the turn's own token, whose signed claims
+         * name the provider — instead of in the in-memory workspace. The file
+         * tools stay on the workspace, as they do on the subprocess lane.
+         */
+        remote_runtime: Type.Optional(
+          Type.Object({ provider_id: Type.String({ minLength: 1 }) })
         ),
         /** The agent's bash prefix policy, enforced before a command runs. */
         bash_policy: Type.Optional(
@@ -361,6 +451,93 @@ export const AgentTurnPollPayloadSchema = Type.Object({
             deny_prefixes: Type.Array(Type.String()),
           })
         ),
+        /**
+         * The gateway tools the agent's tool policy admits, by NAME only —
+         * `ask_user`, `send_message`, `suggest_actions` and the rest of
+         * `@lobu/plugin-conversations`. The guest runs that package's own
+         * implementation, so the route, the request body and the schema live
+         * there and never on this wire; sending a name the package does not
+         * define drops the tool rather than inventing one.
+         *
+         * They reach the SAME gateway on the SAME bearer as the MCP tools
+         * above, so a turn with them still carries exactly one credential.
+         */
+        gateway: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+        /**
+         * The media tools the agent's tool policy admits, by NAME only —
+         * `upload_file`, `generate_image`, `generate_audio` from
+         * `@lobu/plugin-media`. Same contract as `gateway` above: the guest
+         * runs that package's own implementation, so the routes and schemas
+         * live there and never on this wire.
+         *
+         * `upload_file` additionally needs `builtin` to be non-empty. It reads
+         * a file, and on this lane the only filesystem is the turn's in-memory
+         * workspace; a turn without one is offered the other two and not it.
+         */
+        media: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+        /**
+         * Which conversation those tools post into. Required whenever
+         * `gateway` or `media` is non-empty: a tool that addresses a channel
+         * cannot default one, and the guest must never infer routing.
+         */
+        conversation: Type.Optional(
+          Type.Object({
+            channel_id: Type.String({ minLength: 1 }),
+            conversation_id: Type.String({ minLength: 1 }),
+            platform: Type.String({ minLength: 1 }),
+          })
+        ),
+      })
+    ),
+    /**
+     * Long-term memory for this turn: `@lobu/plugin-memory`'s recall hook
+     * before the model runs and its capture hook after it answers. Both reach
+     * `search_memory` / `save_memory` on the named MCP server, over the SAME
+     * route and the SAME bearer every other tool call takes — so a turn with
+     * memory still carries exactly one credential and reaches one host.
+     *
+     * Absent → the turn recalls nothing and captures nothing, which is what a
+     * turn whose agent has no Lobu MCP server gets.
+     */
+    memory: Type.Optional(
+      Type.Object({
+        /** The MCP server the two memory tools are mounted on. */
+        mcp_id: Type.String({ minLength: 1 }),
+        /** The agent a captured observation is attributed to. */
+        agent_id: Type.String({ minLength: 1 }),
+      })
+    ),
+    /**
+     * The stored entry each `messages[i]` replays, in the same order. A
+     * compaction the guest plans by message index is written back as pi's
+     * `firstKeptEntryId` through this list. Absent → the turn cannot compact.
+     */
+    message_entry_ids: Type.Optional(Type.Array(Type.String())),
+    /**
+     * pi's compaction settings for this turn plus the model's context window,
+     * which is what the trigger is measured against. Absent → no compaction.
+     */
+    compaction: Type.Optional(
+      Type.Object({
+        enabled: Type.Boolean(),
+        context_window: Type.Integer({ minimum: 1 }),
+        reserve_tokens: Type.Integer({ minimum: 0 }),
+        keep_recent_tokens: Type.Integer({ minimum: 0 }),
+      })
+    ),
+    /**
+     * Lobu's pre-compaction memory flush: a silent prompt asking the model to
+     * store what it would lose, run once per compaction cycle when the next
+     * prompt would land within `soft_threshold_tokens` of compaction. `due` is
+     * false when this cycle already flushed. Absent → no flush.
+     */
+    memory_flush: Type.Optional(
+      Type.Object({
+        enabled: Type.Boolean(),
+        soft_threshold_tokens: Type.Integer({ minimum: 0 }),
+        system_prompt: Type.String(),
+        prompt: Type.String(),
+        due: Type.Boolean(),
       })
     ),
     /**
@@ -651,6 +828,42 @@ export const CompleteAgentTurnRequestSchema = Type.Object({
   transcript: Type.Optional(
     Type.Array(Type.Record(Type.String(), Type.Unknown()))
   ),
+  /**
+   * The turn already posted its answer INTO the conversation it is replying to,
+   * through the `send_message`/`present_event` conversation tool. The user has
+   * read that message, so delivering `text` as well is the double-post.
+   *
+   * The guest learns this from the plugin's own `onInBandReplyDelivered` hook —
+   * the same hook the subprocess lane threads into `recordInBandReply` — and it
+   * travels here so the completion route can stamp `repliedInBand` on the
+   * terminal `thread_response`, where the renderers' existing suppression
+   * (`chat-response-bridge`) already acts on it.
+   */
+  replied_in_band: Type.Optional(Type.Boolean()),
+  /**
+   * The turn compacted the conversation after answering: pi's summary and the
+   * index into `transcript` of the first message kept verbatim. The completion
+   * route writes it as a `compaction` entry, so the next turn — on either lane
+   * — resumes from the summary.
+   */
+  compaction: Type.Optional(
+    Type.Object({
+      summary: Type.String(),
+      first_kept_index: Type.Integer({ minimum: 0 }),
+      tokens_before: Type.Integer({ minimum: 0 }),
+    })
+  ),
+  /**
+   * The turn ran the pre-compaction memory flush before answering; its
+   * exchange sits in `transcript` up to `after_index`. Recorded as the
+   * `lobu.memory_flush_state` entry the subprocess lane writes.
+   */
+  memory_flush: Type.Optional(
+    Type.Object({
+      outcome: Type.Union([Type.Literal("stored"), Type.Literal("no_reply")]),
+      after_index: Type.Integer({ minimum: 0 }),
+    })
+  ),
   error: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   exit_reason: Type.Optional(WorkerExitReasonSchema),
 });
@@ -683,6 +896,46 @@ export const PollAuthSignalResponseSchema = Type.Object({
 });
 
 /**
+ * Ceiling on ONE streamed turn delta batch, in characters.
+ *
+ * A delta is INCREMENTAL — the span of reply the client has not been sent yet,
+ * not the reply so far — so this bounds one batch, never the answer. Text the
+ * cap holds back stays queued on the worker and rides the next batch, so a
+ * reply longer than this arrives in several batches rather than losing its
+ * head. (The whole reply's own bound is `TURN_MESSAGE_CHARS`, applied by the
+ * gateway to the terminal text; the two are deliberately unrelated numbers.)
+ */
+export const TURN_DELTA_MAX_CHARS = 24_000;
+
+/** What of a tool's output travels with its trace. */
+export const TURN_TOOL_OUTPUT_MAX_CHARS = 2_000;
+
+/**
+ * One finished tool call on an `agent_turn`, as the client should see it.
+ *
+ * The server renders this into the SAME `tool_use` custom event the subprocess
+ * lane emits per `tool_execution_end`, so the SPA, the promptfoo provider and
+ * the menubar read one shape for both lanes rather than learning a second.
+ *
+ * Best-effort like the delta it rides with, and for the same reason: a tool
+ * trace is a VIEW of the turn, never the turn's answer, so a dropped one costs
+ * visibility and nothing else.
+ */
+export const TurnToolEventSchema = Type.Object({
+  tool_call_id: Type.String({ maxLength: 256 }),
+  name: Type.String({ maxLength: 256 }),
+  /**
+   * The call's arguments, as the model sent them. The subprocess lane's
+   * `tool_use` event carries them as `input` and the SPA renders them as the
+   * tool row's args, so this lane carries them too. Absent when the start of
+   * the call was not observed.
+   */
+  input: Type.Optional(Type.Unknown()),
+  is_error: Type.Boolean(),
+  output: Type.String({ maxLength: TURN_TOOL_OUTPUT_MAX_CHARS }),
+});
+
+/**
  * `POST /api/workers/heartbeat`. `progress` is a coarse liveness counter, not an
  * authoritative item count (that arrives on `/stream` + `/complete`).
  */
@@ -706,6 +959,55 @@ export const HeartbeatRequestSchema = Type.Object({
       items_collected_so_far: Type.Optional(Type.Integer()),
     })
   ),
+  /**
+   * The next span of assistant text an `agent_turn` has produced, so a client
+   * watching the conversation sees the answer arrive instead of a blank screen
+   * for the length of the turn.
+   *
+   * It rides the heartbeat rather than a route of its own because the turn
+   * already beats on an interval for exactly this reason — to say it is still
+   * alive — and a delta is that same statement carrying its evidence. The
+   * connector `/stream` route is not the vehicle: that one ingests connector
+   * EVENTS into an org's memory, which a chat delta is not.
+   *
+   * `text` is INCREMENTAL, and that is a contract with the renderers, not a
+   * preference: every consumer of a `thread_response` delta APPENDS it
+   * (`ApiResponseRenderer` → the SPA's `textOut += content`), exactly as the
+   * subprocess lane's `sendStreamDelta(delta, false)` intends. A cumulative
+   * snapshot sent down the same path renders as the reply repeated back to
+   * itself, so this lane sends increments like the lane it replaces.
+   *
+   * A dropped batch cannot leave a hole, because the worker only retires text
+   * the server has ACKNOWLEDGED (`turn_delta_ack`): an unacknowledged batch is
+   * re-sent on the next beat under the SAME sequence, and the server's
+   * sequence fence makes the duplicate a no-op. The turn's terminal `finalText`
+   * remains the authoritative repair for anything lost below that (a delta row
+   * claimed on a pod that does not hold the client's socket).
+   *
+   * Routing is deliberately absent. The server reads where to deliver from the
+   * run's own row, never from this body — a worker may be compromised, and the
+   * same rule already governs `/worker/response`.
+   */
+  turn_delta: Type.Optional(
+    Type.Object({
+      text: Type.String({ maxLength: TURN_DELTA_MAX_CHARS }),
+      /**
+       * Monotonic per turn, and STABLE across a retry of the same batch. The
+       * server keeps the highest it has published and refuses anything at or
+       * below it, so a retried or reordered heartbeat can neither duplicate a
+       * span of the visible reply nor walk it backwards.
+       */
+      sequence: Type.Integer({ minimum: 0 }),
+    })
+  ),
+  /**
+   * Tool calls this `agent_turn` finished since the last beat, oldest first.
+   *
+   * Rides the same beat as `turn_delta` rather than a route of its own, for
+   * the same reason: the turn already reports on this interval, and where the
+   * traces are delivered is read from the run's own row, never from this body.
+   */
+  turn_tool_events: Type.Optional(Type.Array(TurnToolEventSchema)),
 });
 
 /**
@@ -786,6 +1088,59 @@ export type PollAuthSignalResponse = Static<
   typeof PollAuthSignalResponseSchema
 >;
 export type HeartbeatRequest = Static<typeof HeartbeatRequestSchema>;
+export type HeartbeatResponse = Static<typeof HeartbeatResponseSchema>;
+export type AgentTurnToolEvent = Static<typeof TurnToolEventSchema>;
+/**
+ * The heartbeat's reply, and the only channel the gateway has back into a run
+ * it has already handed to a worker. A claimed run belongs to whichever fleet
+ * worker holds its lease, and the gateway cannot address that process — so
+ * anything it needs to tell a turn in flight rides the beat the worker is
+ * already making.
+ *
+ * `continue` is optional because a worker older than this schema answers with a
+ * body that has no such field; absent means "keep going", so the flag only ever
+ * has to be sent to stop something.
+ *
+ * `continue: false` means stop: a human cancelled the run while this worker
+ * still owned it, so the worker ends the turn instead of finishing an answer
+ * nobody will read. A lost lease is not a signal here — it is the 409 the
+ * heartbeat has always answered.
+ *
+ * `steer` carries the messages that arrived for this conversation while the
+ * turn was running and are meant for the model now rather than for the next
+ * turn — pi's steering. The gateway parks them on the run and hands them over
+ * on the next beat, in arrival order; absent on every beat that has none,
+ * which is nearly all of them.
+ *
+ * `turn_delta_ack` is the honest answer to "did that batch land". The worker
+ * does not retire the text it sent until the sequence comes back acknowledged,
+ * so a publish that failed, was fenced out by a lost lease, or never reached
+ * the database is re-sent rather than silently dropped.
+ *
+ * `published: false` is a real outcome, not an error: a shadow turn and a turn
+ * whose sequence was already passed both acknowledge without publishing, and
+ * the worker retires the batch in both cases — there is nothing more it can do
+ * about either. Only the ABSENCE of an ack keeps the text queued.
+ */
+export const HeartbeatResponseSchema = Type.Object({
+  continue: Type.Optional(Type.Boolean()),
+  /** Why the gateway asked the worker to stop. Only set when `continue` is false. */
+  stop_reason: Type.Optional(Type.Literal("cancelled")),
+  steer: Type.Optional(
+    Type.Array(
+      Type.Object({
+        message_id: Type.String(),
+        text: Type.String(),
+      })
+    )
+  ),
+  turn_delta_ack: Type.Optional(
+    Type.Object({
+      sequence: Type.Integer({ minimum: 0 }),
+      published: Type.Boolean(),
+    })
+  ),
+});
 export type DispatchChromeActionRequest = Static<
   typeof DispatchChromeActionRequestSchema
 >;

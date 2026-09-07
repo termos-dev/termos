@@ -37,22 +37,36 @@ import {
   createLogger,
   generateWorkerToken,
   getErrorMessage,
+  isSteerableHumanMessage,
   isToolAllowedByPolicy,
   type MessagePayload,
+  DEFAULT_COMPACTION_SETTINGS,
+  memoryFlushDue,
   parseSessionEntries,
+  replaySessionEntries,
+  resolveMemoryFlushConfig,
+  type SessionEntry,
+  sessionBranch,
+  renderAlwaysOnToolPolicyRulesFor,
   resolveSdkCompat,
   type ToolPolicy,
   type ToolsConfig,
   verifyWorkerToken,
 } from "@lobu/core";
 import type { AgentTurnPollPayload } from "@lobu/core/contracts/worker/protocol";
+import { getModel, type Model } from "@mariozechner/pi-ai";
 import { getDb } from "../../db/client.js";
+import type { AgentRuntimeSelection } from "../../lobu/stores/sandbox-store.js";
 import type { McpConfigService } from "../auth/mcp/config-service.js";
 import type { McpProxy } from "../auth/mcp/proxy.js";
 import type { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
 import type { ProviderCatalogService } from "../auth/provider-catalog.js";
 import type { ModelProviderModule } from "../modules/module-system.js";
 import { readSnapshotJsonl } from "../services/transcript-snapshot.js";
+import {
+  type AgentTurnArtifactReader,
+  resolveTurnAttachments,
+} from "./agent-turn-attachments.js";
 import { buildWorkerTokenClaims } from "./worker-token-claims.js";
 
 const logger = createLogger("agent-turn-shadow");
@@ -74,10 +88,6 @@ const LANE_APIS = new Set<string>([
   "openai-completions",
 ] satisfies LaneApi[]);
 
-/** Snapshot suffix read for history. Twelve 16 KB messages fit comfortably. */
-const HISTORY_TAIL_CHARS = 256 * 1024;
-const HISTORY_MESSAGE_LIMIT = 12;
-const HISTORY_MESSAGE_CHARS = 16_000;
 const TURN_MESSAGE_CHARS = 32_000;
 
 /**
@@ -103,13 +113,59 @@ type TurnTools = NonNullable<TurnEnvelope["tools"]>;
 type BuiltinTool = NonNullable<TurnTools["builtin"]>[number];
 
 /**
- * The workspace tools the guest can run, in the order the model is offered
- * them. `grep` and `edit` are absent on purpose: pi's `grep` spawns ripgrep as
- * a child process, which an isolate cannot do, and neither tool is needed to
- * reach the workspace — just-bash's own `rg`, `grep` and `sed` run inside
- * `bash`. Adding either means writing an in-isolate implementation first.
+ * The gateway tools the isolate lane carries, in the order the model is
+ * offered them.
+ *
+ * This is `@lobu/plugin-conversations`' own tool set. It is named here rather
+ * than imported so the producer states exactly which tools it will hand a turn
+ * — the guest selects by name out of the package, so a name added there does
+ * not silently reach an agent until it is added here too.
+ *
+ * `lobu-media`'s tools are named separately in `MEDIA_TOOLS` below, and
+ * `lobu-memory` publishes no tools at all — its recall and capture are hooks,
+ * carried on the envelope's `memory` field rather than in any tool list.
  */
-const WORKSPACE_TOOLS: readonly BuiltinTool[] = ["bash", "read", "write", "ls", "find"];
+const GATEWAY_TOOLS = [
+  "list_conversations",
+  "read_conversation",
+  "send_message",
+  "present_event",
+  "schedule_followup",
+  "react",
+  "edit_message",
+  "delete_message",
+  "ask_user",
+  "suggest_actions",
+] as const;
+
+/**
+ * The workspace tools the guest can run, in the order the model is offered
+ * them: the seven pi builtins the subprocess lane hardens, each implemented
+ * inside the isolate over the turn's in-memory filesystem (`grep` searches it
+ * directly rather than spawning ripgrep, which an isolate cannot do).
+ */
+const WORKSPACE_TOOLS: readonly BuiltinTool[] = ["bash", "read", "write", "edit", "grep", "ls", "find"];
+
+/**
+ * The media tools the isolate lane carries — `@lobu/plugin-media`'s own.
+ *
+ * Named here rather than imported for the same reason as `GATEWAY_TOOLS`: the
+ * producer states exactly which tools it will hand a turn, so a tool added to
+ * the package does not silently reach an agent.
+ *
+ * `upload_file` is listed unconditionally and filtered by the POLICY like the
+ * rest; whether the turn actually gets it also depends on it having a
+ * workspace to read from, which the guest decides — there is no filesystem on
+ * this lane other than the turn's own in-memory one.
+ */
+const MEDIA_TOOLS = ["upload_file", "generate_image", "generate_audio"] as const;
+
+/**
+ * The MCP server `@lobu/plugin-memory`'s two hooks call. Lobu's own server,
+ * which every agent on this lane already reaches — the hooks are not a second
+ * integration, they are two more calls on the route the turn already uses.
+ */
+const MEMORY_MCP_ID = "lobu";
 
 export interface AgentTurnShadowDeps {
   /** Reads the agent's identity/soul/user layers. Absent → no shadow. */
@@ -133,6 +189,20 @@ export interface AgentTurnShadowDeps {
    * shadow, because there is no URL to hand the worker.
    */
   gatewayUrl?: string;
+  /**
+   * The gateway's artifact store, which is where an inbound attachment's bytes
+   * already live. Absent → an image attachment travels as its name only, and
+   * the resolver logs why. Injected rather than reached for through
+   * `getLobuCoreServices()` for the same reason `gatewayUrl` is: the caller
+   * owns the lookup, and a test can vary it.
+   */
+  artifacts?: AgentTurnArtifactReader;
+  /**
+   * The conversation's pinned runtime sandbox, resolved by the consumer for
+   * the subprocess lane's token. Present → the turn's token carries the same
+   * signed runtime claims and its `bash` runs in that sandbox.
+   */
+  runtime?: AgentRuntimeSelection;
 }
 
 function shadowSelects(agentId: string): boolean {
@@ -163,7 +233,9 @@ function composeShadowSystemPrompt(
     userMd?: string | null;
   },
   mcpInstructions: string[],
-  workspace: boolean
+  workspace: boolean,
+  canUpload: boolean,
+  toolNames: readonly string[]
 ): string {
   const sections: string[] = [];
   const identity = layers.identityMd?.trim();
@@ -172,7 +244,12 @@ function composeShadowSystemPrompt(
   if (identity) sections.push(`## Agent Identity\n\n${identity}`);
   if (soul) sections.push(`## Agent Instructions\n\n${soul}`);
   if (user) sections.push(`## User Context\n\n${user}`);
-  if (workspace) sections.push(WORKSPACE_INSTRUCTIONS);
+  // The same always-on tool rules the subprocess lane composes, narrowed to
+  // the tools THIS turn carries — `ask_user`'s "after calling it, stop" among
+  // them, which is how the model learns the rule the guest enforces.
+  const policyRules = renderAlwaysOnToolPolicyRulesFor(toolNames);
+  if (policyRules) sections.push(policyRules);
+  if (workspace) sections.push(workspaceInstructions(canUpload));
   for (const instructions of mcpInstructions) {
     const text = instructions.trim();
     if (text) sections.push(text);
@@ -182,18 +259,28 @@ function composeShadowSystemPrompt(
 
 /**
  * What the model must know about the workspace its tools act on, and only
- * that: it is private to this turn, starts empty, and has no network. The
- * subprocess lane's own file-IO block is not reused — it instructs the model
- * to hand every generated file to `upload_file`, a tool this lane does not
- * carry.
+ * that: it is private to this turn, starts empty, and has no network.
+ *
+ * The `upload_file` line is appended only when the turn actually carries that
+ * tool — the workspace does not persist, so a file the user should see has to
+ * be handed over during the turn that produced it, and a model told to call a
+ * tool it was not given would just fail.
  */
-const WORKSPACE_INSTRUCTIONS = [
-  "## Workspace",
-  "",
-  "Your bash, read, write, ls and find tools act on a private in-memory workspace at /workspace.",
-  "It starts empty on every turn and nothing written there persists after the turn ends.",
-  "It has no network access and no package manager; use your other tools to reach data.",
-].join("\n");
+function workspaceInstructions(canUpload: boolean): string {
+  const lines = [
+    "## Workspace",
+    "",
+    "Your bash, read, write, ls and find tools act on a private in-memory workspace at /workspace.",
+    "It starts empty on every turn and nothing written there persists after the turn ends.",
+    "It has no network access and no package manager; use your other tools to reach data.",
+  ];
+  if (canUpload) {
+    lines.push(
+      "Nothing in the workspace is visible to the user: to show them a file you produced, call upload_file before the turn ends."
+    );
+  }
+  return lines.join("\n");
+}
 
 type HistoryMessage = Record<string, unknown> & { role: string };
 
@@ -206,16 +293,16 @@ function isTextBlock(block: unknown): block is { type: "text"; text: string } {
   );
 }
 
-/** A content array with its text capped and its thinking blocks dropped. */
+/** A content array with its thinking blocks dropped. */
 function trimContent(content: unknown): unknown[] {
   if (typeof content === "string") {
-    return [{ type: "text", text: content.slice(0, HISTORY_MESSAGE_CHARS) }];
+    return [{ type: "text", text: content }];
   }
   if (!Array.isArray(content)) return [];
   const out: unknown[] = [];
   for (const block of content) {
     if (isTextBlock(block)) {
-      out.push({ type: "text", text: block.text.slice(0, HISTORY_MESSAGE_CHARS) });
+      out.push(block);
       continue;
     }
     // A thinking block carries a provider signature the next provider may not
@@ -238,37 +325,41 @@ function hasToolCall(message: HistoryMessage): boolean {
 /**
  * Rebuild the conversation so far as pi messages.
  *
- * The snapshot stores pi's own entries, and the lane now runs the same tool
- * loop pi ran to produce them, so user, assistant and tool-result entries
- * replay as they are — text capped, thinking dropped, everything else (tool
- * calls, tool results, usage, stop reason) kept, because a provider refuses a
- * tool call without its result and vice versa. The window is then squared off
- * so it opens on a user message and never ends on a tool call still waiting
- * for its result.
+ * The snapshot stores pi's own entries — the same file the subprocess lane's
+ * SessionManager reads — and `replaySessionMessages` walks its current branch
+ * exactly as pi does, compaction summary included, so the whole conversation
+ * replays: nothing is windowed or truncated. The lane runs the same tool loop
+ * pi ran to produce the entries, so tool calls, tool results, usage and stop
+ * reason are kept, because a provider refuses a tool call without its result
+ * and vice versa. Only thinking blocks go, since their provider signature is
+ * not portable. The replay is then squared off so it opens on a user message
+ * and never ends on a tool call still waiting for its result.
  */
-function historyMessages(snapshot: string): HistoryMessage[] {
-  const messages: HistoryMessage[] = [];
-  for (const entry of parseSessionEntries(snapshot).entries) {
-    if (entry.type !== "message" || !entry.message) continue;
-    const message = entry.message as unknown as HistoryMessage;
-    if (message.role !== "user" && message.role !== "assistant" && message.role !== "toolResult") continue;
+function historyMessages(entries: SessionEntry[]): {
+  messages: HistoryMessage[];
+  entryIds: string[];
+} {
+  const replayed: Array<{ entryId: string; message: HistoryMessage }> = [];
+  for (const { entryId, message } of replaySessionEntries(entries)) {
     const content = trimContent(message.content);
     if (content.length === 0) continue;
-    messages.push({ ...message, content });
+    replayed.push({ entryId, message: { ...message, content } });
   }
-  const window = messages.slice(-HISTORY_MESSAGE_LIMIT);
-  const firstUser = window.findIndex((message) => message.role === "user");
-  if (firstUser < 0) return [];
-  const squared = window.slice(firstUser);
+  const firstUser = replayed.findIndex(({ message }) => message.role === "user");
+  if (firstUser < 0) return { messages: [], entryIds: [] };
+  const squared = replayed.slice(firstUser);
   while (squared.length > 0) {
-    const last = squared[squared.length - 1]!;
+    const last = squared[squared.length - 1]!.message;
     if (last.role === "assistant" && hasToolCall(last)) {
       squared.pop();
       continue;
     }
     break;
   }
-  return squared;
+  return {
+    messages: squared.map(({ message }) => message),
+    entryIds: squared.map(({ entryId }) => entryId),
+  };
 }
 
 /**
@@ -304,6 +395,50 @@ interface ShadowProvider {
   baseUrl: string;
   credential: string;
   host: string;
+  /** pi-ai's `Model.input` for this model — which modalities it accepts. */
+  input: ("text" | "image")[];
+  /** pi-ai's `Model.contextWindow`, or the subprocess lane's default for a model the registry does not carry. */
+  contextWindow: number;
+}
+
+/**
+ * Which modalities this model accepts, from pi-ai's own model registry.
+ *
+ * SAME source of truth the subprocess lane uses: it resolves a registry model
+ * through `getModelDynamic` when there is one and otherwise builds a dynamic
+ * entry that declares `["text", "image"]` (`agent-worker`'s
+ * `buildDynamicOpenAIModel`). Both rules are reproduced rather than
+ * re-decided, so an agent's vision support does not depend on which lane ran
+ * its turn — and neither lane hardcodes a per-model guess. pi is what enforces
+ * the answer: `transformMessages` replaces every image block with a
+ * "model does not support images" placeholder when `"image"` is missing.
+ */
+function modelInputModalities(
+  registryProvider: string,
+  modelId: string
+): ("text" | "image")[] {
+  // `getModel` is typed over pi-ai's static registry and cannot take the
+  // strings Lobu resolves at runtime without a cast; it answers undefined for
+  // a model the registry does not carry.
+  const model = getModel(registryProvider as never, modelId as never) as
+    | Model<never>
+    | undefined;
+  return model?.input ? [...model.input] : ["text", "image"];
+}
+
+/**
+ * The subprocess lane's fallback when a model is not in pi-ai's registry
+ * (`model-resolver.ts`): the compaction trigger needs SOME window, and this is
+ * the one the other lane has been measuring against.
+ */
+const DEFAULT_CONTEXT_WINDOW = 128_000;
+
+function modelContextWindow(registryProvider: string, modelId: string): number {
+  const model = getModel(registryProvider as never, modelId as never) as
+    | Model<never>
+    | undefined;
+  const window = model?.contextWindow;
+  return typeof window === "number" && window > 0 ? window : DEFAULT_CONTEXT_WINDOW;
 }
 
 /**
@@ -315,7 +450,7 @@ interface ShadowProvider {
  * `deploymentName` names this lane so a token can never be mistaken for a
  * subprocess deployment's.
  */
-function mintTurnToken(data: MessagePayload): string {
+function mintTurnToken(data: MessagePayload, runtime?: AgentRuntimeSelection): string {
   return generateWorkerToken(
     data.userId,
     data.conversationId,
@@ -328,6 +463,13 @@ function mintTurnToken(data: MessagePayload): string {
         organizationId: data.organizationId,
         platform: data.platform,
         platformMetadata: data.platformMetadata,
+        // The remote runtime reads all of these off the SIGNED token, never a
+        // body: which sandbox, and the egress and package sets the org set.
+        runtimeProviderId: runtime?.runtimeProviderId,
+        sandboxId: runtime?.sandboxId,
+        allowedDomains: data.networkConfig?.allowedDomains,
+        deniedDomains: data.networkConfig?.deniedDomains,
+        nixPackages: data.nixConfig?.packages,
       }),
       messageId: data.messageId,
     }
@@ -413,17 +555,20 @@ async function resolveShadowProvider(
     return null;
   }
 
+  const modelId = bareModelId(
+    args.modelRef,
+    module.providerId,
+    module.getUpstreamConfig?.()?.slug
+  );
   return {
     api: protocol.api,
     provider: protocol.registryAlias,
-    modelId: bareModelId(
-      args.modelRef,
-      module.providerId,
-      module.getUpstreamConfig?.()?.slug
-    ),
+    modelId,
     baseUrl,
     credential,
     host,
+    input: modelInputModalities(protocol.registryAlias, modelId),
+    contextWindow: modelContextWindow(protocol.registryAlias, modelId),
   };
 }
 
@@ -463,7 +608,12 @@ async function resolveTurnTools(
     workerToken: string;
     policy: ToolPolicy;
   }
-): Promise<{ tools: TurnTools | undefined; instructions: string[] }> {
+): Promise<{
+  tools: TurnTools | undefined;
+  instructions: string[];
+  /** Whether the agent actually has the memory MCP server mounted. */
+  hasMemoryServer: boolean;
+}> {
   const tokenData = verifyWorkerToken(args.workerToken);
   if (!tokenData) throw new Error("the turn's own worker token does not verify");
   const servers = await mcp.configService.getMcpStatus(args.agentId, args.organizationId);
@@ -499,7 +649,75 @@ async function resolveTurnTools(
   return {
     tools: definitions.length > 0 ? { gateway_url: args.gatewayUrl, definitions } : undefined,
     instructions,
+    // Read off the SERVER list, not the tool list: the memory hooks call
+    // `search_memory`/`save_memory` directly, and those two are routinely
+    // filtered out of the model's own manifest by the tool policy without the
+    // server being any less reachable.
+    hasMemoryServer: servers.some((server) => server.id === MEMORY_MCP_ID),
   };
+}
+
+/**
+ * A message that arrives while this conversation's turn is still running is
+ * for the model NOW, not for a turn of its own — pi's steering, which the
+ * subprocess lane does through `agent.steer()` on its live session. This lane
+ * parks it on the running run; the worker's next heartbeat carries it in and
+ * the guest hands it to the same pi API. The predicate is the one both lanes
+ * share: automation messages, session resets, `!`-bash and attachments never
+ * steer, and the message must come from the user whose turn it is.
+ *
+ * Returns true when the message was parked, in which case it must not become
+ * a turn of its own. The lookup runs over the in-flight rows only (the status
+ * index), then matches the conversation on the envelope.
+ */
+export async function steerActiveAgentTurn(data: MessagePayload): Promise<boolean> {
+  if (!data.agentId || !data.conversationId || !data.messageText?.trim()) return false;
+  // Same selection as the producer, checked BEFORE any database work: an
+  // unselected agent costs the enqueue path an env-var read, nothing more.
+  if (!shadowSelects(data.agentId)) return false;
+  if (!isSteerableHumanMessage(data)) return false;
+  try {
+    return await parkSteer(data);
+  } catch (error) {
+    // Best-effort, like the producer: a failure here must never fail the
+    // message's real turn on the subprocess lane. The message simply becomes
+    // a turn of its own on this lane too.
+    logger.warn(
+      { agentId: data.agentId, conversationId: data.conversationId, error: getErrorMessage(error) },
+      "Agent turn steer could not be parked; the message becomes its own turn"
+    );
+    return false;
+  }
+}
+
+async function parkSteer(data: MessagePayload): Promise<boolean> {
+  const sql = getDb();
+  const parked = (await sql`
+    UPDATE runs
+    SET run_metadata = jsonb_set(
+      COALESCE(run_metadata, '{}'::jsonb),
+      '{steer}',
+      COALESCE(run_metadata->'steer', '[]'::jsonb) || ${sql.json([{ message_id: data.messageId, text: data.messageText }])}::jsonb,
+      true
+    )
+    WHERE id = (
+      SELECT id FROM runs
+      WHERE organization_id = ${data.organizationId}
+        AND run_type = 'agent_turn'
+        AND status IN ('pending', 'claimed', 'running')
+        AND action_input->'turn'->>'conversation_id' = ${data.conversationId}
+        AND action_input->'reply'->>'user_id' = ${data.userId}
+      ORDER BY id DESC
+      LIMIT 1
+    )
+    RETURNING id
+  `) as unknown as Array<{ id: number }>;
+  if (parked.length === 0) return false;
+  logger.info(
+    { agentId: data.agentId, conversationId: data.conversationId, messageId: data.messageId, runId: parked[0]?.id },
+    "Message steered into the running agent turn on the isolate lane"
+  );
+  return true;
 }
 
 /**
@@ -514,13 +732,28 @@ export async function enqueueAgentTurnShadow(
     if (!data.agentId || !shadowSelects(data.agentId)) return;
     if (!data.organizationId) return;
 
-    // An attachment-only message has no text for this lane to send, and both
-    // providers reject an empty user turn — so it would enqueue a run that can
-    // only fail. The isolate lane carries no attachments yet.
-    if (!data.messageText?.trim()) {
+    // The turn's attachments, resolved host-side out of the gateway's own
+    // artifact store. Done BEFORE the empty-text check, because an
+    // attachment-only message is a real turn once its images are resolved —
+    // it is only unsendable when nothing at all came through.
+    const attachments = await resolveTurnAttachments(
+      data.platformMetadata,
+      deps.artifacts,
+      { agentId: data.agentId, messageId: data.messageId }
+    );
+
+    // Nothing to send: no text, no image the model can see, and no attachment
+    // worth naming. Both providers reject an empty user turn, so this would
+    // enqueue a run that can only fail.
+    const messageText = data.messageText?.trim() ?? "";
+    if (
+      !messageText &&
+      attachments.images.length === 0 &&
+      attachments.files.length === 0
+    ) {
       logger.info(
         { agentId: data.agentId, messageId: data.messageId },
-        "Agent turn shadow skipped: the message carries no text for the turn to send"
+        "Agent turn shadow skipped: the message carries neither text nor a resolvable attachment for the turn to send"
       );
       return;
     }
@@ -566,7 +799,7 @@ export async function enqueueAgentTurnShadow(
       return;
     }
 
-    const workerToken = mintTurnToken(data);
+    const workerToken = mintTurnToken(data, deps.runtime);
     const provider = await resolveShadowProvider(module, {
       agentId: data.agentId,
       organizationId: data.organizationId,
@@ -578,6 +811,8 @@ export async function enqueueAgentTurnShadow(
     if (!provider) return;
 
     let tools: TurnTools | undefined;
+    // Memory is off unless the agent actually has the server its hooks call.
+    let hasMemoryServer = false;
     let mcpInstructions: string[] = [];
     const policy = turnToolPolicy(data.agentOptions);
     const toolsConfig = data.agentOptions?.toolsConfig as ToolsConfig | undefined;
@@ -606,16 +841,29 @@ export async function enqueueAgentTurnShadow(
       });
       tools = resolved.tools;
       mcpInstructions = resolved.instructions;
+      hasMemoryServer = resolved.hasMemoryServer;
     }
 
     // The workspace tools the policy admits. `bash` carries its prefix policy
     // with it; the file tools need none beyond being admitted.
     const builtin = WORKSPACE_TOOLS.filter((name) => isToolAllowedByPolicy(name, policy));
-    if (builtin.length > 0) {
+    // The gateway tools the policy admits, through the SAME builder and the
+    // same patterns that decide them on the subprocess lane — so an agent that
+    // denies `ask_user` denies it on both lanes.
+    const gateway = GATEWAY_TOOLS.filter((name) => isToolAllowedByPolicy(name, policy));
+    // The media tools the policy admits, through the same builder again.
+    const media = MEDIA_TOOLS.filter((name) => isToolAllowedByPolicy(name, policy));
+    if (builtin.length > 0 || gateway.length > 0 || media.length > 0) {
       tools = {
         gateway_url: gatewayUrl,
+        // Accumulated, not replaced: an agent can have MCP tools and workspace
+        // tools and conversation tools, and dropping the MCP set here is how
+        // the model silently loses the 90% of calls that go through it.
         definitions: tools?.definitions ?? [],
-        builtin,
+        ...(builtin.length > 0 ? { builtin } : {}),
+        ...(builtin.includes("bash") && deps.runtime?.runtimeProviderId
+          ? { remote_runtime: { provider_id: deps.runtime.runtimeProviderId } }
+          : {}),
         ...(builtin.includes("bash")
           ? {
               bash_policy: {
@@ -625,33 +873,108 @@ export async function enqueueAgentTurnShadow(
               },
             }
           : {}),
+        // The conversation rides with them: every one of these tools addresses
+        // a channel, and the guest must never infer routing. Both families
+        // need it, so it is emitted once for either.
+        ...(gateway.length > 0 ? { gateway: [...gateway] } : {}),
+        ...(media.length > 0 ? { media: [...media] } : {}),
+        ...(gateway.length > 0 || media.length > 0
+          ? {
+              conversation: {
+                channel_id: data.channelId,
+                conversation_id: data.conversationId,
+                platform: data.platform,
+              },
+            }
+          : {}),
       };
     }
 
     const settings = await agentSettings.getSettings(data.agentId, {
       organizationId: data.organizationId,
     });
+    // The whole transcript: the snapshot writer already bounds it at
+    // MAX_SNAPSHOT_BYTES, and a shorter read would silently forget the
+    // conversation's head — which is what compaction exists to do deliberately.
     const snapshot = await readSnapshotJsonl({
       organizationId: data.organizationId,
       agentId: data.agentId,
       conversationId: data.conversationId,
-      suffixChars: HISTORY_TAIL_CHARS,
     });
+    const entries = snapshot ? parseSessionEntries(snapshot).entries : [];
+    const history = historyMessages(entries);
+    // The flush runs once per compaction cycle; the branch says whether this
+    // cycle already did, exactly as the subprocess lane reads its session.
+    const flushState = memoryFlushDue(sessionBranch(entries));
+    const memoryFlush = resolveMemoryFlushConfig(
+      (data.agentOptions ?? {}) as Record<string, unknown>
+    );
 
+    if (hasMemoryServer && !tools) {
+      logger.info(
+        { agentId: data.agentId },
+        "Agent turn shadow: the agent has the memory server but the turn carries no tools, so it runs without memory"
+      );
+    }
     const turn: TurnEnvelope = {
       agent_id: data.agentId,
       conversation_id: data.conversationId,
       message_id: data.messageId,
-      message_text: data.messageText.slice(0, TURN_MESSAGE_CHARS),
-      system_prompt: composeShadowSystemPrompt(settings ?? {}, mcpInstructions, builtin.length > 0),
-      messages: snapshot ? historyMessages(snapshot) : [],
+      message_text: (data.messageText ?? "").slice(0, TURN_MESSAGE_CHARS),
+      // Bytes, already read out of the artifact store. An attachment URL never
+      // reaches the guest, so a turn cannot be talked into dialling one.
+      ...(attachments.images.length > 0 ? { message_images: attachments.images } : {}),
+      // Names and types only, which is also all the subprocess lane sends the
+      // model for a non-image upload. This is NOT a file capability.
+      ...(attachments.files.length > 0 ? { message_files: attachments.files } : {}),
+      system_prompt: composeShadowSystemPrompt(
+        settings ?? {},
+        mcpInstructions,
+        builtin.length > 0,
+        // The guest drops `upload_file` when the turn has no workspace, so the
+        // prompt must not promise it either.
+        builtin.length > 0 && media.includes("upload_file"),
+        // Every tool the model will actually be offered, whichever family it
+        // came from: an MCP server's `search_memory` earns the thread-history
+        // rule exactly as the conversation plugin's `send_message` earns the
+        // channel-participation one.
+        [...(tools?.definitions ?? []).map((tool) => tool.name), ...gateway, ...media, ...builtin]
+      ),
+      messages: history.messages,
+      message_entry_ids: history.entryIds,
+      // pi's own defaults, measured against this model's window. The lane
+      // compacts the way the subprocess lane's SessionManager would.
+      compaction: {
+        enabled: DEFAULT_COMPACTION_SETTINGS.enabled,
+        context_window: provider.contextWindow,
+        reserve_tokens: DEFAULT_COMPACTION_SETTINGS.reserveTokens,
+        keep_recent_tokens: DEFAULT_COMPACTION_SETTINGS.keepRecentTokens,
+      },
+      memory_flush: {
+        enabled: memoryFlush.enabled,
+        soft_threshold_tokens: memoryFlush.softThresholdTokens,
+        system_prompt: memoryFlush.systemPrompt,
+        prompt: memoryFlush.prompt,
+        due: flushState.due,
+      },
       provider: {
         api: provider.api,
         provider: provider.provider,
         model_id: provider.modelId,
         base_url: provider.baseUrl,
+        input: provider.input,
       },
       ...(tools ? { tools } : {}),
+      // The memory hooks, when the agent has the server they call. They are
+      // not tools and carry no schema: the guest runs
+      // `@lobu/plugin-memory`'s own two hooks over the MCP route the turn
+      // already uses.
+      // The hooks reach the MCP route through `tools.gateway_url`, so a turn
+      // that carries no tools cannot recall or capture; say so here rather
+      // than promise a hook the guest would drop.
+      ...(hasMemoryServer && tools
+        ? { memory: { mcp_id: MEMORY_MCP_ID, agent_id: data.agentId } }
+        : {}),
       // DENY-ALL. A connector's allowlist defaults open; an agent turn's does
       // not. The gateway is the only host this turn has any business
       // reaching: the provider is behind its proxy and the tools behind its
@@ -695,8 +1018,13 @@ export async function enqueueAgentTurnShadow(
         provider: provider.provider,
         model: provider.modelId,
         history: turn.messages.length,
+        images: attachments.images.length,
+        files: attachments.files.length,
         tools: tools?.definitions.length ?? 0,
         workspaceTools: builtin,
+        gatewayTools: gateway,
+        mediaTools: media,
+        memory: hasMemoryServer,
       },
       "Enqueued a shadow agent turn on the isolate lane"
     );

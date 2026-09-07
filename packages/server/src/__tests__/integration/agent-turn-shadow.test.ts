@@ -9,15 +9,12 @@ import {
   AgentTurnPollPayloadSchema,
   PollResponseSchema,
 } from '@lobu/core/contracts/worker/protocol';
-import {
-  AGENT_ERRORS,
-  AgentErrorCode,
-  type MessagePayload,
-  verifyWorkerToken,
-} from '@lobu/core';
+import { AGENT_ERRORS, AgentErrorCode, parseSessionEntries, replaySessionMessages, type MessagePayload, verifyWorkerToken } from '@lobu/core';
 import { Value } from '@sinclair/typebox/value';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { enqueueAgentTurnShadow } from '../../gateway/orchestration/agent-turn-shadow';
+import { enqueueAgentTurnShadow,
+  steerActiveAgentTurn,
+} from '../../gateway/orchestration/agent-turn-shadow';
 import { reapStaleRuns } from '../../scheduled/check-stalled-executions';
 import { sweepStaleAgentTurnRuns } from '../../worker-api/agent-turn';
 import type { AgentSettingsStore } from '../../gateway/auth/settings/agent-settings-store';
@@ -138,6 +135,39 @@ function messageFor(organizationId: string): MessagePayload {
   } as MessagePayload;
 }
 
+/**
+ * An artifact store holding exactly the fixtures the attachment tests publish.
+ * Stands in for the gateway's real one so the producer's resolution path is
+ * exercised without the filesystem — what matters is that it resolves by
+ * ARTIFACT ID, which is the only key this fake answers to.
+ */
+function fakeArtifacts() {
+  const held: Record<string, { contentType: string; bytes: Buffer }> = {
+    'art-image': { contentType: 'image/png', bytes: Buffer.from('PNG!') },
+    'art-doc': { contentType: 'application/pdf', bytes: Buffer.from('%PDF') },
+  };
+  const metadataFor = (artifactId: string) => {
+    const fixture = held[artifactId];
+    if (!fixture) return null;
+    return {
+      artifactId,
+      filename: 'stored',
+      contentType: fixture.contentType,
+      size: fixture.bytes.length,
+      createdAt: 0,
+      sha256: '0'.repeat(64),
+    };
+  };
+  return {
+    inspect: async (artifactId: string) => metadataFor(artifactId) as never,
+    read: async (artifactId: string) => {
+      const fixture = held[artifactId];
+      const metadata = metadataFor(artifactId);
+      return fixture && metadata ? ({ metadata, bytes: fixture.bytes } as never) : null;
+    },
+  };
+}
+
 async function shadowRuns() {
   const sql = getTestDb();
   return (await sql`
@@ -252,21 +282,39 @@ describe('agent turn shadow producer', () => {
       allowed_hosts: ['gateway.test.invalid'],
     });
     expect(envelope.turn.system_prompt).toBe(
-      '## Agent Identity\n\nI am the shadow agent.\n\n## Agent Instructions\n\nAnswer briefly.\n\n## Workspace\n\n' +
+      '## Agent Identity\n\nI am the shadow agent.\n\n## Agent Instructions\n\nAnswer briefly.\n\n' +
+        // Policy text must match the tools this envelope actually offers.
+        '## Built-In Tool Policies\n\n' +
+        '### Structured User Choices\nTools: `ask_user`\n' +
+        '- Use ask_user when you need the user to choose from a short list of options or approvals.\n' +
+        '- Use plain text only for open-ended clarifications or when you need a free-form value.\n' +
+        "- After calling ask_user, stop. The user's answer arrives as the next message.\n\n" +
+        '### Share Created Files\nTools: `upload_file`\n' +
+        '- If you create a file that helps answer the request, use upload_file so the user can access it in-thread.\n' +
+        '- Never claim a file was sent unless upload_file actually succeeded in this turn.\n' +
+        '- Never show sandbox:, workspace, or local filesystem links to the user as if they are downloadable attachments.\n\n' +
+        '### Participate In Your Channels\nTools: `list_conversations`, `read_conversation`, `send_message`\n' +
+        '- You can participate in chat channels you are bound to, even on a scheduled/automated run with no one messaging you. Call list_conversations to see them.\n' +
+        '- To act in a channel: read_conversation to catch up on what people said, then send_message to post. Pass a conversation handle to post to the channel, or a thread handle (returned by a previous send_message) to reply in that thread.\n' +
+        '- Only what you send_message reaches the channel — your normal reply text does not. Decide deliberately what and where to post; it is fine to post nothing.\n\n' +
+        '## Workspace\n\n' +
         'Your bash, read, write, ls and find tools act on a private in-memory workspace at /workspace.\n' +
         'It starts empty on every turn and nothing written there persists after the turn ends.\n' +
-        'It has no network access and no package manager; use your other tools to reach data.'
+        'It has no network access and no package manager; use your other tools to reach data.\n' +
+        'Nothing in the workspace is visible to the user: to show them a file you produced, call upload_file before the turn ends.'
     );
     expect(envelope.turn.messages).toEqual([]);
     // With no tool policy every workspace tool is admitted, bash with the
     // default package-manager denylist and no allowlist.
     const tools = envelope.turn.tools as {
       definitions: unknown[];
+      media: string[];
       builtin: string[];
       bash_policy: { allow_all: boolean; allow_prefixes: string[]; deny_prefixes: string[] };
     };
     expect(tools.definitions).toEqual([]);
-    expect(tools.builtin).toEqual(['bash', 'read', 'write', 'ls', 'find']);
+    expect(tools.media).toEqual(['upload_file', 'generate_image', 'generate_audio']);
+    expect(tools.builtin).toEqual(['bash', 'read', 'write', 'edit', 'grep', 'ls', 'find']);
     expect(tools.bash_policy.allow_all).toBe(false);
     expect(tools.bash_policy.allow_prefixes).toEqual([]);
     expect(tools.bash_policy.deny_prefixes).toContain('pip install ');
@@ -276,6 +324,23 @@ describe('agent turn shadow producer', () => {
     // ever sees a provider key.
     expect(envelope.credential).toBe('lobu_secret_11111111-2222-3333-4444-555555555555');
     expect(JSON.stringify(envelope.turn)).not.toContain('lobu_secret_');
+  });
+
+  it('omits file-delivery instructions when upload_file is denied', async () => {
+    const org = await createTestOrganization();
+    const message = messageFor(org.id);
+    message.agentOptions = { ...message.agentOptions, disallowedTools: 'upload_file' };
+    await enqueueAgentTurnShadow(message, {
+      agentSettings: settingsStore,
+      catalog: catalogFor(claudeModule()),
+      gatewayUrl: GATEWAY_URL,
+    });
+    const [run] = await shadowRuns();
+    const turn = run.action_input.turn;
+    expect(turn.tools.media).toEqual(['generate_image', 'generate_audio']);
+    expect(turn.tools.builtin).toContain('write');
+    expect(turn.system_prompt).not.toContain('### Share Created Files');
+    expect(turn.system_prompt).not.toContain('call upload_file before the turn ends');
   });
 
   it('hands the turn its tools, its one credential being a worker token both gateway routes accept', async () => {
@@ -319,7 +384,7 @@ describe('agent turn shadow producer', () => {
     ]);
     expect(envelope.turn.tools).toMatchObject({
       gateway_url: GATEWAY_URL,
-      builtin: ['bash', 'read', 'write', 'ls', 'find'],
+      builtin: ['bash', 'read', 'write', 'edit', 'grep', 'ls', 'find'],
       definitions: [
         {
           mcp_id: 'lobu-memory',
@@ -404,11 +469,70 @@ describe('agent turn shadow producer', () => {
     // No MCP surface wired, yet the workspace still ships: the two halves of
     // the manifest are independent.
     expect(turn.tools?.definitions).toEqual([]);
-    expect(turn.tools?.builtin).toEqual(['bash', 'read', 'ls', 'find']);
+    // `write` is denied; `edit` is a different tool and stays.
+    expect(turn.tools?.builtin).toEqual(['bash', 'read', 'edit', 'grep', 'ls', 'find']);
     expect(turn.tools?.bash_policy.allow_all).toBe(false);
     expect(turn.tools?.bash_policy.allow_prefixes).toEqual(['git', 'ls']);
     expect(turn.tools?.bash_policy.deny_prefixes.slice(-1)).toEqual(['rm']);
     expect(turn.tools?.bash_policy.deny_prefixes).toContain('npm install ');
+  });
+
+  it('hands the turn the conversation tools its policy admits, addressed at this conversation', async () => {
+    const org = await createTestOrganization();
+    const message = messageFor(org.id);
+    await enqueueAgentTurnShadow(message, {
+      agentSettings: settingsStore,
+      catalog: catalogFor(tokenEchoingModule()),
+      gatewayUrl: GATEWAY_URL,
+    });
+
+    const [run] = await shadowRuns();
+    const turn = run.action_input.turn as {
+      tools?: { gateway?: string[]; conversation?: Record<string, string> };
+    };
+    expect(Value.Check(AgentTurnPollPayloadSchema, { turn })).toBe(true);
+    // With no policy every conversation tool is admitted. Names only: the
+    // routing and the schemas live in `@lobu/plugin-conversations`, which the
+    // guest runs directly, so nothing about the tools crosses this wire.
+    expect(turn.tools?.gateway).toEqual([
+      'list_conversations',
+      'read_conversation',
+      'send_message',
+      'present_event',
+      'schedule_followup',
+      'react',
+      'edit_message',
+      'delete_message',
+      'ask_user',
+      'suggest_actions',
+    ]);
+    // Every one of them addresses a channel, so the routing travels with them
+    // rather than being inferred inside the isolate.
+    expect(turn.tools?.conversation).toEqual({
+      channel_id: message.channelId,
+      conversation_id: message.conversationId,
+      platform: message.platform,
+    });
+  });
+
+  it('denies a conversation tool the agent policy denies, on the same patterns the subprocess lane reads', async () => {
+    const org = await createTestOrganization();
+    const message = messageFor(org.id);
+    message.agentOptions = {
+      model: 'claude/claude-opus-4-8',
+      toolsConfig: { deniedTools: ['ask_user', 'send_message'] },
+    };
+    await enqueueAgentTurnShadow(message, {
+      agentSettings: settingsStore,
+      catalog: catalogFor(tokenEchoingModule()),
+      gatewayUrl: GATEWAY_URL,
+    });
+
+    const [run] = await shadowRuns();
+    const turn = run.action_input.turn as { tools?: { gateway?: string[] } };
+    expect(turn.tools?.gateway).not.toContain('ask_user');
+    expect(turn.tools?.gateway).not.toContain('send_message');
+    expect(turn.tools?.gateway).toContain('suggest_actions');
   });
 
   it('runs the turn without tools when it cannot honour them, and still enqueues it', async () => {
@@ -426,8 +550,11 @@ describe('agent turn shadow producer', () => {
       const turn = rows[produced - 1].action_input.turn as { tools?: { definitions: unknown[]; builtin?: string[] } };
       // The workspace tools are the policy's business, not the MCP surface's:
       // they ship regardless, with no MCP definitions beside them.
+      // No tools means no gateway URL for the memory hooks either, so the
+      // envelope promises no memory it cannot deliver.
+      expect((turn as { memory?: unknown }).memory).toBeUndefined();
       expect(turn.tools?.definitions).toEqual([]);
-      expect(turn.tools?.builtin).toEqual(['bash', 'read', 'write', 'ls', 'find']);
+      expect(turn.tools?.builtin).toEqual(['bash', 'read', 'write', 'edit', 'grep', 'ls', 'find']);
     };
 
     // No MCP surface wired.
@@ -454,7 +581,7 @@ describe('agent turn shadow producer', () => {
     await toolless();
   });
 
-  it('replays the conversation with its tool calls and results, squared to a well-formed window', async () => {
+  it('replays the conversation with its tool calls and results, squared to a well-formed history', async () => {
     const org = await createTestOrganization();
     const sql = getTestDb();
     const at = new Date(Date.now() - 60_000).toISOString();
@@ -472,8 +599,8 @@ describe('agent turn shadow producer', () => {
     });
     const snapshot = [
       JSON.stringify({ type: 'session', version: 3, id: 'prior', timestamp: at, cwd: '/w' }),
-      // A tool result whose call fell off the window: dropped, so the window
-      // opens on the human.
+      // A tool result whose call is not in the transcript: dropped, so the
+      // history opens on the human.
       entry('orphan', { role: 'toolResult', toolCallId: 'toolu_00', toolName: 'query_sdk', content: [{ type: 'text', text: 'stale' }], isError: false, timestamp: 1 }),
       entry('u1', { role: 'user', content: 'how many entities?', timestamp: 1 }),
       entry('a1', assistant([
@@ -484,7 +611,7 @@ describe('agent turn shadow producer', () => {
       entry('a2', { ...assistant([{ type: 'text', text: 'There are 3.' }]), stopReason: 'stop' }),
       entry('u2', { role: 'user', content: 'and companies?', timestamp: 1 }),
       // The last turn died mid-call: a tool call with no result would be
-      // refused by the provider, so the window ends before it.
+      // refused by the provider, so the history ends before it.
       entry('a3', assistant([{ type: 'toolCall', id: 'toolu_02', name: 'query_sdk', arguments: {} }])),
       '',
     ].join('\n');
@@ -518,6 +645,185 @@ describe('agent turn shadow producer', () => {
     expect(turn.messages[2]).toMatchObject({ role: 'toolResult', toolCallId: 'toolu_01', isError: false });
     expect(turn.messages[3]).toMatchObject({ content: [{ type: 'text', text: 'There are 3.' }] });
     expect(turn.messages[4]).toMatchObject({ role: 'user', content: [{ type: 'text', text: 'and companies?' }] });
+    // Nothing on this branch recorded a flush, so the first cycle's is due.
+    expect((run.action_input.turn as { memory_flush: { due: boolean } }).memory_flush.due).toBe(true);
+    expect((run.action_input.turn as { message_entry_ids: string[] }).message_entry_ids).toEqual(['u1', 'a1', 't1', 'a2', 'u2']);
+  });
+
+  it('replays the whole conversation, compaction summary included, not a window of it', async () => {
+    const org = await createTestOrganization();
+    const sql = getTestDb();
+    const at = new Date(Date.now() - 60_000).toISOString();
+    const entry = (id: string, parentId: string | null, message: Record<string, unknown>) =>
+      JSON.stringify({ type: 'message', id, parentId, timestamp: at, message });
+    const reply = (text: string) => ({
+      role: 'assistant',
+      content: [{ type: 'text', text }],
+      api: 'anthropic-messages',
+      provider: 'anthropic',
+      model: 'claude-opus-4-8',
+      stopReason: 'stop',
+      timestamp: 1,
+    });
+    // Forty turns — far past the twelve messages the lane used to keep — with a
+    // compaction in the middle, exactly as pi's SessionManager writes one.
+    const lines: string[] = [JSON.stringify({ type: 'session', version: 3, id: 'long', timestamp: at, cwd: '/w' })];
+    let parent: string | null = null;
+    for (let i = 0; i < 10; i++) {
+      lines.push(entry(`u${i}`, parent, { role: 'user', content: `question ${i}`, timestamp: 1 }));
+      lines.push(entry(`a${i}`, `u${i}`, reply(`answer ${i}`)));
+      parent = `a${i}`;
+    }
+    lines.push(
+      JSON.stringify({
+        type: 'compaction',
+        id: 'c1',
+        parentId: parent,
+        timestamp: at,
+        summary: 'The first eight exchanges were small talk.',
+        firstKeptEntryId: 'u8',
+        tokensBefore: 90000,
+      })
+    );
+    // This cycle already flushed: the subprocess lane's own state entry.
+    lines.push(
+      JSON.stringify({
+        type: 'custom',
+        id: 'flush1',
+        parentId: 'c1',
+        timestamp: at,
+        customType: 'lobu.memory_flush_state',
+        data: { compactionCount: 1, outcome: 'stored', timestamp: 1 },
+      })
+    );
+    parent = 'flush1';
+    for (let i = 10; i < 40; i++) {
+      lines.push(entry(`u${i}`, parent, { role: 'user', content: `question ${i}`, timestamp: 1 }));
+      lines.push(entry(`a${i}`, `u${i}`, reply(`answer ${i}`)));
+      parent = `a${i}`;
+    }
+    const snapshot = `${lines.join('\n')}\n`;
+    const [prior] = await sql<{ id: number }>`
+      INSERT INTO runs (run_type, status, organization_id, created_at, completed_at, run_at)
+      VALUES ('chat_message', 'completed', ${org.id}, ${at}, ${at}, ${at})
+      RETURNING id
+    `;
+    await sql`
+      INSERT INTO agent_transcript_snapshot
+        (organization_id, agent_id, conversation_id, run_id, snapshot_jsonl, byte_size, terminal_status, created_at)
+      VALUES (${org.id}, ${AGENT_ID}, 'conv-shadow', ${prior.id}, ${snapshot}, ${Buffer.byteLength(snapshot)}, 'completed', ${at})
+    `;
+
+    await enqueueAgentTurnShadow(messageFor(org.id), {
+      agentSettings: settingsStore,
+      catalog: catalogFor(tokenEchoingModule()),
+      mcp: mcpFixture().mcp,
+      gatewayUrl: GATEWAY_URL,
+    });
+
+    const [run] = await shadowRuns();
+    const turn = run.action_input.turn as {
+      messages: Array<{ role: string; content: Array<{ text: string }> }>;
+      message_entry_ids: string[];
+      compaction: Record<string, unknown>;
+      memory_flush: Record<string, unknown>;
+    };
+    // Summary, the two kept exchanges (u8..a9), then thirty more: 1 + 4 + 60.
+    expect(turn.messages).toHaveLength(65);
+    // Every replayed message names the entry it came from, the summary its
+    // compaction, so a compaction the guest plans by index maps back to pi's
+    // firstKeptEntryId.
+    expect(turn.message_entry_ids).toHaveLength(65);
+    expect(turn.message_entry_ids.slice(0, 3)).toEqual(['c1', 'u8', 'a8']);
+    expect(turn.message_entry_ids[64]).toBe('a39');
+    // pi's own settings against this model's window.
+    expect(turn.compaction).toMatchObject({ enabled: true, reserve_tokens: 16384, keep_recent_tokens: 20000 });
+    expect(turn.compaction.context_window).toBeGreaterThan(16384);
+    // The flush state entry after c1 says this cycle already flushed.
+    expect(turn.memory_flush).toMatchObject({ enabled: true, soft_threshold_tokens: 4000, due: false });
+    expect(turn.messages[0].role).toBe('user');
+    expect(turn.messages[0].content[0].text).toContain('The first eight exchanges were small talk.');
+    expect(turn.messages[1].content[0].text).toBe('question 8');
+    expect(turn.messages[64].content[0].text).toBe('answer 39');
+    // What the compaction replaced is not replayed.
+    expect(JSON.stringify(turn.messages)).not.toContain('"answer 3"');
+    expect(JSON.stringify(turn.messages)).not.toContain('"question 7"');
+  });
+
+  it('parks a steerable follow-up on the running turn instead of making it a turn of its own', async () => {
+    const org = await createTestOrganization();
+    const sql = getTestDb();
+    await enqueueAgentTurnShadow(messageFor(org.id), {
+      agentSettings: settingsStore,
+      catalog: catalogFor(tokenEchoingModule()),
+      mcp: mcpFixture().mcp,
+      gatewayUrl: GATEWAY_URL,
+    });
+    const claimed = await pollFleet('fleet-steer', { agent_turn: true });
+    const { run_id: runId } = (await claimed.json()) as { run_id: number };
+
+    // The same human, in the same conversation, while the turn runs: parked.
+    const followUp = { ...messageFor(org.id), messageId: 'msg-2', messageText: 'also check companies' };
+    expect(await steerActiveAgentTurn(followUp)).toBe(true);
+    // Another follow-up queues behind it, in order.
+    expect(await steerActiveAgentTurn({ ...followUp, messageId: 'msg-3', messageText: 'and people' })).toBe(true);
+    const [row] = (await sql`SELECT run_metadata FROM runs WHERE id = ${runId}`) as unknown as Array<{
+      run_metadata: { steer?: unknown };
+    }>;
+    expect(row.run_metadata.steer).toEqual([
+      { message_id: 'msg-2', text: 'also check companies' },
+      { message_id: 'msg-3', text: 'and people' },
+    ]);
+    // No second run was produced for either.
+    expect(await shadowRuns()).toHaveLength(1);
+
+    // Someone else in the conversation, or an automation's message, is not a
+    // steer — the predicate both lanes share says so.
+    expect(await steerActiveAgentTurn({ ...followUp, userId: 'user-other' })).toBe(false);
+    expect(
+      await steerActiveAgentTurn({ ...followUp, platformMetadata: { source: 'automation-run' } } as typeof followUp)
+    ).toBe(false);
+    // Nothing running in another conversation: nothing to steer.
+    expect(await steerActiveAgentTurn({ ...followUp, conversationId: 'conv-elsewhere' })).toBe(false);
+    // An agent the operator has not selected costs the enqueue path nothing.
+    expect(await steerActiveAgentTurn({ ...followUp, agentId: 'agent-not-selected' })).toBe(false);
+  });
+
+  it('carries a pinned sandbox as signed token claims and a remote-bash marker', async () => {
+    const org = await createTestOrganization();
+    await enqueueAgentTurnShadow(
+      { ...messageFor(org.id), networkConfig: { allowedDomains: ['example.com'] }, nixConfig: { packages: ['ripgrep'] } } as MessagePayload,
+      {
+        agentSettings: settingsStore,
+        catalog: catalogFor(tokenEchoingModule()),
+        mcp: mcpFixture().mcp,
+        gatewayUrl: GATEWAY_URL,
+        runtime: { runtimeProviderId: 'vercel', sandboxId: 'sandbox-1' },
+      }
+    );
+    const [run] = await shadowRuns();
+    const turn = run.action_input.turn as { tools?: { remote_runtime?: unknown } };
+    expect(turn.tools?.remote_runtime).toEqual({ provider_id: 'vercel' });
+    // The exec route trusts only the signed token for these — never a body.
+    const claims = verifyWorkerToken((run.action_input as { credential: string }).credential) as Record<string, unknown>;
+    expect(claims).toMatchObject({
+      runtimeProviderId: 'vercel',
+      sandboxId: 'sandbox-1',
+      allowedDomains: ['example.com'],
+      nixPackages: ['ripgrep'],
+    });
+  });
+
+  it('marks no remote bash for an unpinned conversation', async () => {
+    const org = await createTestOrganization();
+    await enqueueAgentTurnShadow(messageFor(org.id), {
+      agentSettings: settingsStore,
+      catalog: catalogFor(tokenEchoingModule()),
+      mcp: mcpFixture().mcp,
+      gatewayUrl: GATEWAY_URL,
+    });
+    const [run] = await shadowRuns();
+    expect((run.action_input.turn as { tools?: { remote_runtime?: unknown } }).tools?.remote_runtime).toBeUndefined();
   });
 
   it('arms no turn marker and journals no run input', async () => {
@@ -645,8 +951,10 @@ describe('agent turn shadow producer', () => {
     await enqueueAgentTurnShadow(noModel, deps);
     expect(await shadowRuns()).toHaveLength(0);
 
-    // An attachment-only message: both providers reject an empty user turn, so
-    // enqueueing one would only ever produce a failed run.
+    // A message with neither text nor a resolvable attachment: both providers
+    // reject an empty user turn, so enqueueing one would only ever produce a
+    // failed run. (An attachment-only message that DOES resolve is a real turn
+    // — see the attachment tests below.)
     const noText = messageFor(org.id);
     noText.messageText = '   ';
     await enqueueAgentTurnShadow(noText, deps);
@@ -668,6 +976,100 @@ describe('agent turn shadow producer', () => {
     process.env[SHADOW_ENV] = '*';
     await enqueueAgentTurnShadow(messageFor(org.id), deps);
     expect(await shadowRuns()).toHaveLength(1);
+  });
+
+  it("carries the message's image attachments as bytes and the rest as names", async () => {
+    const org = await createTestOrganization();
+    const message = messageFor(org.id);
+    message.platformMetadata = {
+      files: [
+        {
+          id: 'art-image',
+          name: 'shot.png',
+          mimetype: 'image/png',
+          size: 4,
+          // Inert: the producer resolves by artifact id, never by URL.
+          downloadUrl: 'https://attacker.invalid/pwn.png',
+        },
+        { id: 'art-doc', name: 'report.pdf', mimetype: 'application/pdf', size: 2048 },
+      ],
+    };
+
+    await enqueueAgentTurnShadow(message, {
+      agentSettings: settingsStore,
+      catalog: catalogFor(claudeModule()),
+      gatewayUrl: GATEWAY_URL,
+      artifacts: fakeArtifacts(),
+    });
+
+    const [run] = await shadowRuns();
+    const turn = (run?.action_input as { turn: Record<string, unknown> }).turn;
+    expect(turn.message_images).toEqual([
+      { mime_type: 'image/png', data: Buffer.from('PNG!').toString('base64') },
+    ]);
+    expect(turn.message_files).toEqual([
+      { name: 'report.pdf', mime_type: 'application/pdf', size: 2048 },
+    ]);
+    // No attachment URL is anywhere in the envelope the guest will be handed.
+    expect(JSON.stringify(turn)).not.toContain('attacker.invalid');
+  });
+
+  it('enqueues an attachment-only message once its image resolves, and refuses one whose image does not', async () => {
+    const org = await createTestOrganization();
+    const withImage = messageFor(org.id);
+    withImage.messageText = '';
+    withImage.platformMetadata = {
+      files: [{ id: 'art-image', name: 'shot.png', mimetype: 'image/png', size: 4 }],
+    };
+
+    await enqueueAgentTurnShadow(withImage, {
+      agentSettings: settingsStore,
+      catalog: catalogFor(claudeModule()),
+      gatewayUrl: GATEWAY_URL,
+      artifacts: fakeArtifacts(),
+    });
+
+    const [run] = await shadowRuns();
+    const turn = (run?.action_input as { turn: Record<string, unknown> }).turn;
+    expect(turn.message_text).toBe('');
+    expect(turn.message_images).toHaveLength(1);
+
+    // The same message against a store that holds nothing: no image resolves,
+    // no name survives either, so there is no turn to send.
+    const unresolvable = messageFor(org.id);
+    unresolvable.messageText = '';
+    unresolvable.platformMetadata = {
+      files: [{ name: 'shot.png', mimetype: 'image/png' }],
+    };
+    await enqueueAgentTurnShadow(unresolvable, {
+      agentSettings: settingsStore,
+      catalog: catalogFor(claudeModule()),
+      gatewayUrl: GATEWAY_URL,
+      artifacts: fakeArtifacts(),
+    });
+    // Still just the first run: the unresolvable one names the file, so it DOES
+    // enqueue — what must never enqueue is a message with nothing at all.
+    expect(await shadowRuns()).toHaveLength(2);
+    const second = (await shadowRuns())[1];
+    const secondTurn = (second?.action_input as { turn: Record<string, unknown> }).turn;
+    expect(secondTurn.message_images).toBeUndefined();
+    expect(secondTurn.message_files).toEqual([{ name: 'shot.png', mime_type: 'image/png' }]);
+  });
+
+  it("puts the model's own modalities on the envelope, from pi-ai's registry", async () => {
+    const org = await createTestOrganization();
+    await enqueueAgentTurnShadow(messageFor(org.id), {
+      agentSettings: settingsStore,
+      catalog: catalogFor(claudeModule()),
+      gatewayUrl: GATEWAY_URL,
+    });
+
+    const [run] = await shadowRuns();
+    const turn = (run?.action_input as { turn: { provider: { input?: string[] } } }).turn;
+    // Whatever pi-ai says this model accepts — asserted as a non-empty list
+    // that always contains text, because the registry's per-model answer is
+    // pi-ai's to change, not this test's to pin.
+    expect(turn.provider.input).toContain('text');
   });
 });
 
@@ -831,6 +1233,106 @@ describe('agent turn completion', () => {
     expect(entries[1].parentId).toBe(entries[0].id);
   });
 
+  it('persists the whole turn verbatim, then the flush state and the compaction pi would have written', async () => {
+    const workerId = 'fleet-persists-tools';
+    const runId = await claimedShadowRun(workerId);
+    const sql = getTestDb();
+    // The producer handed this turn two messages of history, each naming its
+    // stored entry; the guest returns them back followed by what the turn added.
+    const history = [
+      { role: 'user', content: [{ type: 'text', text: 'earlier question' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'earlier answer' }] },
+    ];
+    await sql`
+      UPDATE runs
+      SET action_input = jsonb_set(
+        jsonb_set(
+          jsonb_set(action_input, '{turn,shadow}', 'false'::jsonb),
+          '{turn,messages}', ${sql.json(history)}::jsonb
+        ),
+        '{turn,message_entry_ids}', ${sql.json(['h0', 'h1'])}::jsonb
+      )
+      WHERE id = ${runId}
+    `;
+    const response = await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id: runId,
+      worker_id: workerId,
+      status: 'completed',
+      text: 'there are 3',
+      transcript: [
+        ...history,
+        // The flush the guest ran first, then the human's turn as the guest
+        // already cleaned it, then the tool loop and the reply.
+        { role: 'user', content: [{ type: 'text', text: 'Store durable memories now.' }] },
+        { role: 'assistant', content: [{ type: 'text', text: 'NO_REPLY' }], stopReason: 'stop' },
+        { role: 'user', content: [{ type: 'text', text: 'what is the shadow lane?' }] },
+        {
+          role: 'assistant',
+          content: [{ type: 'toolCall', id: 'toolu_9', name: 'query_sdk', arguments: { code: 'entities.count()' } }],
+          stopReason: 'toolUse',
+        },
+        { role: 'toolResult', toolCallId: 'toolu_9', toolName: 'query_sdk', content: [{ type: 'text', text: '3' }], isError: false },
+        { role: 'assistant', content: [{ type: 'text', text: 'there are 3' }], stopReason: 'stop' },
+      ],
+      memory_flush: { outcome: 'no_reply', after_index: 3 },
+      // Keep from the human's message (transcript index 4) onwards.
+      compaction: { summary: 'Earlier, a question was answered.', first_kept_index: 4, tokens_before: 900 },
+    });
+    expect(response.status).toBe(200);
+
+    const [snapshot] = (await sql`
+      SELECT snapshot_jsonl FROM agent_transcript_snapshot WHERE run_id = ${runId}
+    `) as unknown as Array<{ snapshot_jsonl: string }>;
+    const entries = snapshot.snapshot_jsonl
+      .split('\n')
+      .filter((line) => line.trim())
+      .map((line) => JSON.parse(line));
+    // The history is not written twice; every new message is, verbatim, with
+    // the flush state right after the flush's exchange and the compaction last.
+    expect(entries.map((entry) => entry.type)).toEqual([
+      'message',
+      'message',
+      'custom',
+      'message',
+      'message',
+      'message',
+      'message',
+      'compaction',
+    ]);
+    expect(entries.filter((e) => e.type === 'message').map((e) => e.message.role)).toEqual([
+      'user',
+      'assistant',
+      'user',
+      'assistant',
+      'toolResult',
+      'assistant',
+    ]);
+    expect(entries[2]).toMatchObject({
+      customType: 'lobu.memory_flush_state',
+      data: { compactionCount: 0, outcome: 'no_reply' },
+    });
+    expect(entries[3].message.content).toEqual([{ type: 'text', text: 'what is the shadow lane?' }]);
+    expect(entries[4].message).toMatchObject({
+      content: [{ type: 'toolCall', id: 'toolu_9', name: 'query_sdk' }],
+      stopReason: 'toolUse',
+    });
+    // The compaction keeps from the human's message: transcript index 4 is
+    // the third new message, whose entry is the fourth line.
+    expect(entries[7]).toMatchObject({
+      type: 'compaction',
+      summary: 'Earlier, a question was answered.',
+      firstKeptEntryId: entries[3].id,
+      tokensBefore: 900,
+    });
+    // One chain, so the next turn's replay reaches every entry.
+    for (let i = 1; i < entries.length; i++) expect(entries[i].parentId).toBe(entries[i - 1].id);
+    // And that replay opens on the summary, then the kept messages.
+    const replayed = replaySessionMessages(parseSessionEntries(snapshot.snapshot_jsonl).entries);
+    expect(replayed.map((m) => m.role)).toEqual(['user', 'user', 'assistant', 'toolResult', 'assistant']);
+    expect(JSON.stringify(replayed[0]!.content)).toContain('Earlier, a question was answered.');
+    expect(replayed[1]!.content).toEqual([{ type: 'text', text: 'what is the shadow lane?' }]);
+  });
+
   it('an oversize prior transcript starts a continuation instead of hanging the client', async () => {
     const workerId = 'fleet-delivers-oversize';
     const runId = await claimedShadowRun(workerId);
@@ -944,6 +1446,319 @@ describe('agent turn completion', () => {
       SELECT count(*)::int AS n FROM agent_transcript_snapshot WHERE run_id = ${runId}
     `) as unknown as Array<{ n: number }>;
     expect(n).toBe(0);
+  });
+
+  /** Make a claimed turn authoritative, the way the cutover will. */
+  async function makeAuthoritative(runId: number): Promise<void> {
+    const sql = getTestDb();
+    await sql`
+      UPDATE runs
+      SET action_input = jsonb_set(action_input, '{turn,shadow}', 'false'::jsonb)
+      WHERE id = ${runId}
+    `;
+  }
+
+  /** Just the delta spans of a set of thread_response rows, in order. */
+  function rows_delta(rows: Array<Record<string, unknown>>): unknown[] {
+    return rows.filter((row) => row.delta !== undefined).map((row) => row.delta);
+  }
+
+  /** The queued thread_response rows, oldest first. */
+  async function threadResponses(): Promise<Array<Record<string, unknown>>> {
+    const sql = getTestDb();
+    const rows = (await sql`
+      SELECT action_input FROM runs
+      WHERE queue_name = 'thread_response' AND run_type = 'chat_message'
+      ORDER BY id ASC
+    `) as unknown as Array<{ action_input: Record<string, unknown> }>;
+    return rows.map((row) => row.action_input);
+  }
+
+  it('drops an oversize or malformed span unpublished and unacknowledged, and keeps the beat', async () => {
+    const workerId = 'fleet-oversize-span';
+    const runId = await claimedShadowRun(workerId);
+    await makeAuthoritative(runId);
+    // One past TURN_DELTA_MAX_CHARS (24_000): the schema bound, now enforced.
+    const oversize = await postAsFleet('/api/workers/heartbeat', {
+      run_id: runId,
+      worker_id: workerId,
+      turn_delta: { text: 'x'.repeat(24_001), sequence: 1 },
+    });
+    expect(oversize.status).toBe(200);
+    expect(await oversize.json()).toEqual({ continue: true });
+    const malformed = await postAsFleet('/api/workers/heartbeat', {
+      run_id: runId,
+      worker_id: workerId,
+      turn_tool_events: [{ tool_call_id: 'c', name: 'x', is_error: 'yes', output: 'o' }],
+    });
+    expect(malformed.status).toBe(200);
+    expect(await threadResponses()).toHaveLength(0);
+    // A well-formed span still streams.
+    const fine = await postAsFleet('/api/workers/heartbeat', {
+      run_id: runId,
+      worker_id: workerId,
+      turn_delta: { text: 'ok', sequence: 1 },
+    });
+    expect(await fine.json()).toMatchObject({ turn_delta_ack: { sequence: 1, published: true } });
+  });
+
+  it('streams an in-flight turn to the client on the heartbeat it already sends', async () => {
+    const workerId = 'fleet-streams';
+    const runId = await claimedShadowRun(workerId);
+    await makeAuthoritative(runId);
+
+    // The worker beats twice as the reply grows. The text is INCREMENTAL: the
+    // second beat CONTINUES the first rather than restating it, because every
+    // renderer of a delta appends (`ApiResponseRenderer` -> the SPA's
+    // `textOut += content`), exactly as the subprocess lane's
+    // `sendStreamDelta(delta, false)` intends.
+    const first = await postAsFleet('/api/workers/heartbeat', {
+      run_id: runId,
+      worker_id: workerId,
+      turn_delta: { text: 'the isolate', sequence: 1 },
+    });
+    expect(first.status).toBe(200);
+    // The ack is what lets the worker retire the span it sent. Without one it
+    // must re-send the same text under the same sequence.
+    expect(await first.json()).toMatchObject({
+      turn_delta_ack: { sequence: 1, published: true },
+    });
+    const second = await postAsFleet('/api/workers/heartbeat', {
+      run_id: runId,
+      worker_id: workerId,
+      turn_delta: { text: ' lane answered', sequence: 2 },
+    });
+    expect(second.status).toBe(200);
+
+    const rows = await threadResponses();
+    expect(rows).toHaveLength(2);
+    // Addressed from the RUN's own reply envelope, never from the heartbeat
+    // body — the worker names no destination and cannot.
+    expect(rows[0]).toMatchObject({
+      messageId: 'msg-shadow',
+      channelId: 'api_user-shadow',
+      conversationId: 'conv-shadow',
+      userId: 'user-shadow',
+      platform: 'api',
+      delta: 'the isolate',
+      // Not a replacement: the client appends this span to what it has.
+      isFullReplacement: false,
+    });
+    expect(rows[1]).toMatchObject({
+      delta: ' lane answered',
+      isFullReplacement: false,
+    });
+    // Appending the spans — all the client does — rebuilds the reply exactly.
+    expect(rows.map((row) => row.delta).join('')).toBe('the isolate lane answered');
+    // A delta is not terminal: it carries no finalText and discharges nothing,
+    // so the turn is still awaiting its completion.
+    expect(rows[1].finalText).toBeUndefined();
+    expect(rows[1].processedMessageIds).toBeUndefined();
+    const row = await runRow(runId);
+    expect(row.status).toBe('running');
+  });
+
+  it('never publishes the same span twice on a retried or reordered heartbeat', async () => {
+    const workerId = 'fleet-reorder';
+    const runId = await claimedShadowRun(workerId);
+    await makeAuthoritative(runId);
+
+    await postAsFleet('/api/workers/heartbeat', {
+      run_id: runId,
+      worker_id: workerId,
+      turn_delta: { text: 'the isolate', sequence: 1 },
+    });
+    await postAsFleet('/api/workers/heartbeat', {
+      run_id: runId,
+      worker_id: workerId,
+      turn_delta: { text: ' lane answered', sequence: 2 },
+    });
+    // An older sequence arriving late (at-least-once delivery) would otherwise
+    // append a span the client has already read, a second time.
+    const stale = await postAsFleet('/api/workers/heartbeat', {
+      run_id: runId,
+      worker_id: workerId,
+      turn_delta: { text: 'the isolate', sequence: 1 },
+    });
+    // The heartbeat itself still succeeds — liveness is its job, and a dropped
+    // delta must never get a live turn reaped.
+    expect(stale.status).toBe(200);
+    // And it is ACKNOWLEDGED, as not-published: there is nothing more the
+    // worker can do about a sequence the run has already passed, so it retires
+    // the batch rather than re-sending it forever.
+    expect(await stale.json()).toMatchObject({
+      turn_delta_ack: { sequence: 1, published: false },
+    });
+    // A redelivery of the newest sequence is likewise not republished.
+    const redelivered = await postAsFleet('/api/workers/heartbeat', {
+      run_id: runId,
+      worker_id: workerId,
+      turn_delta: { text: ' lane answered', sequence: 2 },
+    });
+    expect(await redelivered.json()).toMatchObject({
+      turn_delta_ack: { sequence: 2, published: false },
+    });
+
+    // Exactly the two spans, each once: the retry duplicated nothing and the
+    // reorder erased nothing.
+    expect(rows_delta(await threadResponses())).toEqual([
+      'the isolate',
+      ' lane answered',
+    ]);
+  });
+
+  it('does not stream a shadow turn, and refuses a delta from a worker that did not claim the run', async () => {
+    const shadowWorker = 'fleet-shadow-stream';
+    const shadowRunId = await claimedShadowRun(shadowWorker);
+    // Left as a shadow: it exists to be compared, not to answer anyone.
+    const shadowBeat = await postAsFleet('/api/workers/heartbeat', {
+      run_id: shadowRunId,
+      worker_id: shadowWorker,
+      turn_delta: { text: 'an observational copy', sequence: 1 },
+    });
+    expect(shadowBeat.status).toBe(200);
+    // Acknowledged as not-published, so the worker stops re-sending text that
+    // by definition has nowhere to go.
+    expect(await shadowBeat.json()).toMatchObject({
+      turn_delta_ack: { sequence: 1, published: false },
+    });
+
+    const claimantRunId = await claimedShadowRun('fleet-claimant-stream');
+    await makeAuthoritative(claimantRunId);
+    // Not this worker's run: its text must not reach another turn's client.
+    // The lease fence refuses it, and — critically — it gets NO ack, because
+    // an ack would tell a worker to drop text it may legitimately still owe.
+    const impostor = await postAsFleet('/api/workers/heartbeat', {
+      run_id: claimantRunId,
+      worker_id: 'fleet-impostor-stream',
+      turn_delta: { text: 'not mine to publish', sequence: 1 },
+    });
+    expect(await impostor.json()).not.toMatchObject({
+      turn_delta_ack: { published: true },
+    });
+
+    expect(await threadResponses()).toEqual([]);
+  });
+
+  it('publishes a finished tool call as the tool_use event both lanes use', async () => {
+    const workerId = 'fleet-tool-trace';
+    const runId = await claimedShadowRun(workerId);
+    await makeAuthoritative(runId);
+
+    const beat = await postAsFleet('/api/workers/heartbeat', {
+      run_id: runId,
+      worker_id: workerId,
+      turn_tool_events: [
+        {
+          tool_call_id: 'call-1',
+          name: 'search_memory',
+          input: { query: 'pricing' },
+          is_error: false,
+          output: '3 results',
+        },
+      ],
+    });
+    expect(beat.status).toBe(200);
+
+    const rows = await threadResponses();
+    expect(rows).toHaveLength(1);
+    // The SAME customEvent name the subprocess lane emits per
+    // `tool_execution_end`, so every consumer already subscribed to `tool_use`
+    // sees this lane's tools without learning a second shape.
+    expect(rows[0]).toMatchObject({
+      conversationId: 'conv-shadow',
+      customEvent: {
+        name: 'tool_use',
+        // `input` is what the SPA renders as the tool row's args, as on the subprocess lane.
+        data: { toolCallId: 'call-1', name: 'search_memory', input: { query: 'pricing' }, isError: false },
+      },
+    });
+  });
+
+  it('does not publish a tool trace for a shadow turn', async () => {
+    const workerId = 'fleet-tool-shadow';
+    const runId = await claimedShadowRun(workerId);
+    const beat = await postAsFleet('/api/workers/heartbeat', {
+      run_id: runId,
+      worker_id: workerId,
+      turn_tool_events: [
+        { tool_call_id: 'c1', name: 'bash', is_error: false, output: 'ok' },
+      ],
+    });
+    expect(beat.status).toBe(200);
+    expect(await threadResponses()).toEqual([]);
+  });
+
+  it('stamps repliedInBand so an in-band reply is not delivered twice', async () => {
+    const workerId = 'fleet-in-band';
+    const runId = await claimedShadowRun(workerId);
+    await makeAuthoritative(runId);
+
+    // The agent called `send_message` into the conversation it is answering,
+    // so the user has already READ the answer. The guest reports it; without
+    // this flag the completion route would queue `text` as well and the user
+    // would see the same answer twice.
+    const response = await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id: runId,
+      worker_id: workerId,
+      status: 'completed',
+      text: 'I posted the summary above.',
+      replied_in_band: true,
+      transcript: [],
+    });
+    expect(response.status).toBe(200);
+
+    const rows = await threadResponses();
+    expect(rows).toHaveLength(1);
+    // The row still carries the reply — it is the authoritative record and
+    // other consumers read it — but it is marked, and the renderers' existing
+    // suppression (`chat-response-bridge`) is what drops the delivery.
+    expect(rows[0]).toMatchObject({
+      finalText: 'I posted the summary above.',
+      repliedInBand: true,
+    });
+  });
+
+  it('leaves an ordinary turn unmarked, so only a positive signal suppresses', async () => {
+    const workerId = 'fleet-not-in-band';
+    const runId = await claimedShadowRun(workerId);
+    await makeAuthoritative(runId);
+
+    await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id: runId,
+      worker_id: workerId,
+      status: 'completed',
+      text: 'here is the answer',
+      transcript: [],
+    });
+
+    const rows = await threadResponses();
+    expect(rows).toHaveLength(1);
+    // Absent, not false: suppression acts on a positive signal only, never on
+    // silence, so an older worker still gets its reply delivered.
+    expect(rows[0].repliedInBand).toBeUndefined();
+  });
+
+  it('never marks a FAILED turn as replied in band', async () => {
+    const workerId = 'fleet-in-band-failed';
+    const runId = await claimedShadowRun(workerId);
+    await makeAuthoritative(runId);
+
+    await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id: runId,
+      worker_id: workerId,
+      status: 'failed',
+      error: 'provider refused',
+      replied_in_band: true,
+    });
+
+    const rows = await threadResponses();
+    expect(rows).toHaveLength(1);
+    // An error is not a duplicate of the reply and must always surface, so the
+    // flag never rides an error row — suppressing it would leave the user with
+    // no message at all.
+    expect(rows[0].repliedInBand).toBeUndefined();
+    expect(rows[0].error).toBe('provider refused');
   });
 
   it('a shadow turn still delivers nothing', async () => {

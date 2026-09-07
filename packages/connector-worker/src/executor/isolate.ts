@@ -349,6 +349,13 @@ const GUEST_RUNNER = String.raw`
       // waiting for the host, and the host reports its own hook failures by
       // terminating the run.
       H.async('emitTurnEvent', JSON.stringify(event));
+    }, function () {
+      // Synchronous: pi drains steering between model calls, and the answer
+      // is whatever the host has parked by then.
+      return JSON.parse(H.sync('takeSteering'));
+    }, function (request) {
+      // A sandbox-pinned conversation's bash: the host runs it remotely.
+      return H.async('runtimeExec', JSON.stringify(request)).then(function (json) { return JSON.parse(json); });
     });
     return { mode: 'agent_turn', turn: output };
   }
@@ -608,6 +615,11 @@ export class IsolateExecutor implements SyncExecutor {
       vault.clear();
       host?.terminate(state);
     };
+    // A caller's abort ends the run the way an uncaught guest error does:
+    // the guest is torn down and the pending result rejects with this state.
+    const onCancel = () => terminate({ name: 'RunCancelled', message: 'the run was cancelled' });
+    if (hooks?.signal?.aborted) onCancel();
+    else hooks?.signal?.addEventListener('abort', onCancel, { once: true });
 
     const queueHook = (task: () => Promise<void> | void): Promise<void> => {
       const next = processingChain.then(async () => {
@@ -729,6 +741,10 @@ export class IsolateExecutor implements SyncExecutor {
         // Before the headers: the request fails with the guest's abort reason.
         // After them: the body stream errors with it, and the upstream socket
         // is released either way.
+        // Steering, pulled rather than pushed: the guest asks at the points pi
+        // drains steering messages, so nothing has to reach into a running
+        // isolate. Empty for every lane but an agent turn with a follow-up.
+        takeSteering: () => JSON.stringify(hooks?.takeSteering?.() ?? []),
         fetchAbort: (id: unknown) => {
           const active = typeof id === 'number' ? activeFetches.get(id) : undefined;
           if (active) {
@@ -756,6 +772,17 @@ export class IsolateExecutor implements SyncExecutor {
             await hooks?.onEventChunk?.(events);
           });
           return undefined;
+        },
+        runtimeExec: async (json: unknown) => {
+          if (!hooks?.onRuntimeExec) throw new Error('the remote runtime is not available in this execution context');
+          const parsed = parseGuestJson(json, 'runtimeExec');
+          const request = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
+          if (typeof request.command !== 'string') throw new Error('runtimeExec: command must be a string');
+          const result = await hooks.onRuntimeExec({
+            command: request.command,
+            ...(typeof request.timeoutMs === 'number' ? { timeoutMs: request.timeoutMs } : {}),
+          });
+          return JSON.stringify(result);
         },
         emitTurnEvent: async (json: unknown) => {
           const event = parseGuestJson(json, 'emitTurnEvent') as AgentTurnEvent;
@@ -1076,6 +1103,7 @@ export class IsolateExecutor implements SyncExecutor {
       }
       return outcome.result;
     } finally {
+      hooks?.signal?.removeEventListener('abort', onCancel);
       runAbort.abort();
       for (const timer of pendingSleeps) clearTimeout(timer);
       pendingSleeps.clear();

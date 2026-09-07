@@ -58,7 +58,8 @@ function mockWorkerCtx(body: unknown): {
 async function insertRun(
   organizationId: string,
   status: string,
-  claimedBy: string | null
+  claimedBy: string | null,
+  runType = 'automation'
 ): Promise<number> {
   const sql = getTestDb();
   const rows = (await sql`
@@ -66,7 +67,7 @@ async function insertRun(
       (organization_id, run_type, status, claimed_by, claimed_at,
        last_heartbeat_at, created_at)
     VALUES
-      (${organizationId}, 'automation', ${status}, ${claimedBy}, NOW(),
+      (${organizationId}, ${runType}, ${status}, ${claimedBy}, NOW(),
        NULL, NOW())
     RETURNING id
   `) as Array<{ id: number }>;
@@ -114,6 +115,103 @@ describe('heartbeat lease guard', () => {
     expect(String(run.status)).toBe('timeout');
     expect(run.last_heartbeat_at).toBeNull();
     expect(run.run_metadata?.device_agent_session).toBeUndefined();
+  });
+
+  // The gateway cannot address a fleet worker that already holds a run, so the
+  // heartbeat's response is its only way to tell a turn in flight to stop. A
+  // cancelled run fails the lease fence exactly like a lost lease does (the
+  // fence requires status='running'), and the agent-turn arm has to tell them
+  // apart: on a cancel it still owns the run and stops the model; on a lost
+  // lease another worker owns the run and this one must not touch it.
+  it('tells an agent turn\'s own worker to stop when a human cancelled it', async () => {
+    const org = await createTestOrganization();
+    const runId = await insertRun(org.id, 'cancelled', CLAIMANT, 'agent_turn');
+
+    const { ctx, result } = mockWorkerCtx({ run_id: runId, worker_id: CLAIMANT });
+    await heartbeat(ctx);
+
+    expect(result().status).toBe(200);
+    expect(result().body).toEqual({ continue: false, stop_reason: 'cancelled' });
+    // Still a refusal to write: the cancelled run's liveness clock stays clear,
+    // so this answer cannot keep a dead run off the reaper's next sweep.
+    const run = await readRun(runId);
+    expect(String(run.status)).toBe('cancelled');
+    expect(run.last_heartbeat_at).toBeNull();
+  });
+
+  // Every other lane learns about a cancel the way it always has: a non-2xx.
+  // The automation daemon aborts its CLI on a 409 and the Chrome heartbeat
+  // stops its alarm on a 4xx; a 200 here would leave both running.
+  it('keeps answering 409 to a cancelled run on every other lane', async () => {
+    const org = await createTestOrganization();
+    const runId = await insertRun(org.id, 'cancelled', CLAIMANT, 'automation');
+
+    const { ctx, result } = mockWorkerCtx({ run_id: runId, worker_id: CLAIMANT });
+    await heartbeat(ctx);
+
+    expect(result().status).toBe(409);
+    expect((await readRun(runId)).last_heartbeat_at).toBeNull();
+  });
+
+  it('does NOT report cancellation to a worker that no longer owns the run', async () => {
+    const org = await createTestOrganization();
+    const runId = await insertRun(org.id, 'cancelled', CLAIMANT, 'agent_turn');
+
+    const { ctx, result } = mockWorkerCtx({ run_id: runId, worker_id: OTHER });
+    await heartbeat(ctx);
+
+    // OTHER is not the claimant, so it learns nothing about this run beyond
+    // "not yours" — the ownership fence gates the cancel signal too.
+    expect(result().status).toBe(409);
+  });
+
+  it('hands parked steer messages to an agent turn once, in order, and to no other lane', async () => {
+    const org = await createTestOrganization();
+    const sql = getTestDb();
+    const turn = await insertRun(org.id, 'running', CLAIMANT, 'agent_turn');
+    const other = await insertRun(org.id, 'running', CLAIMANT, 'automation');
+    const parked = [
+      { message_id: 'm-2', text: 'also check companies' },
+      { message_id: 'm-3', text: 'and people' },
+    ];
+    await sql`UPDATE runs SET run_metadata = ${sql.json({ steer: parked })} WHERE id IN (${turn}, ${other})`;
+
+    const first = mockWorkerCtx({ run_id: turn, worker_id: CLAIMANT });
+    await heartbeat(first.ctx);
+    expect(first.result().status).toBe(200);
+    expect(first.result().body).toEqual({ continue: true, steer: parked });
+    // Taken: the next beat carries nothing, and the rest of run_metadata is untouched.
+    const second = mockWorkerCtx({ run_id: turn, worker_id: CLAIMANT });
+    await heartbeat(second.ctx);
+    expect(second.result().body).toEqual({ continue: true });
+    expect((await readRun(turn)).run_metadata).toEqual({});
+
+    // Another lane's run keeps whatever is under that key; the beat ignores it.
+    const otherBeat = mockWorkerCtx({ run_id: other, worker_id: CLAIMANT });
+    await heartbeat(otherBeat.ctx);
+    expect(otherBeat.result().body).toEqual({ continue: true });
+    expect((await readRun(other)).run_metadata).toEqual({ steer: parked });
+
+    // A worker that does not own the turn takes nothing.
+    const turn2 = await insertRun(org.id, 'running', CLAIMANT, 'agent_turn');
+    await sql`UPDATE runs SET run_metadata = ${sql.json({ steer: parked })} WHERE id = ${turn2}`;
+    const stranger = mockWorkerCtx({ run_id: turn2, worker_id: OTHER });
+    await heartbeat(stranger.ctx);
+    expect(stranger.result().status).toBe(409);
+    expect((await readRun(turn2)).run_metadata).toEqual({ steer: parked });
+  });
+
+  it('keeps answering continue:true while the run is healthy', async () => {
+    const org = await createTestOrganization();
+    const runId = await insertRun(org.id, 'running', CLAIMANT);
+
+    const { ctx, result } = mockWorkerCtx({ run_id: runId, worker_id: CLAIMANT });
+    await heartbeat(ctx);
+
+    expect(result().status).toBe(200);
+    expect(result().body).toEqual({ continue: true });
+    const run = await readRun(runId);
+    expect(run.last_heartbeat_at).not.toBeNull();
   });
 
   it('does NOT let a non-claimant pin its agent session onto a running run', async () => {
